@@ -82,6 +82,8 @@ module tb_riscv_tests;
         run_test("lw");
         run_test("sb");     run_test("sh");     run_test("sw");
         run_test("ld_st");  run_test("st_ld");
+        run_test("mul");    run_test("mulh");   run_test("mulhsu"); run_test("mulhu");
+        run_test("div");    run_test("divu");   run_test("rem");    run_test("remu");
 
         $display("\n%0d passed, %0d failed", passed, failed);
         if (failed == 0) $display("*** ALL riscv-tests PASSED ***");

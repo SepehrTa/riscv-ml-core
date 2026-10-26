@@ -61,6 +61,7 @@ module decoder
                     
                     
                 endcase 
+                if (instr_inp[25]) result_src = MD_res;  
         end
         7'b0010011: begin //i-arith
                 imm_sel = IMM_I; 
@@ -98,7 +99,7 @@ module decoder
         end
         7'b0100011: begin //store
             alu_op = ALU_ADD;
-            imm_sel = IMM_S;                    // CHANGED: was IMM_I (stores use the S format)
+            imm_sel = IMM_S;                    
             alu_a_sel = RS1; 
             alu_b_sel = IMME;
             mem_write = 1;
@@ -108,20 +109,20 @@ module decoder
             jal = 0;
             jalr = 0;
         end
-        7'b1100011: begin //branch             // CHANGED: opcode (was 7'b0010011)
-                                                // CHANGED: removed the branch_comparator instance
+        7'b1100011: begin //branch             
+                                               
             alu_op = ALU_ADD;
-            imm_sel = IMM_B;                    // CHANGED: was IMM_I (branches use the B format)
+            imm_sel = IMM_B;                    
             alu_a_sel = RS1; 
             alu_b_sel = IMME;
             mem_write = 0;
-            reg_write = 0;                      // CHANGED: was 1 (branches write no register)
+            reg_write = 0;                      
             result_src = MEM_res;
-            branch = 1;                         // CHANGED: added (the comparator decides "taken" in core.sv)
+            branch = 1;                         //  added (the comparator decides "taken" in core.sv)
             jal = 0;
             jalr = 0;
         end
-        7'b1101111: begin //jal                // ADDED (opcode was 7'b0010011)
+        7'b1101111: begin //jal                //  (opcode was 7'b0010011)
             alu_op = ALU_ADD;
             imm_sel = IMM_J; 
             alu_a_sel = RS1; 
@@ -133,7 +134,7 @@ module decoder
             jal = 1;
             jalr = 0;
         end
-        7'b1100111: begin //jalr               // ADDED (opcode was 7'b0010011)
+        7'b1100111: begin //jalr               //  (opcode was 7'b0010011)
             alu_op = ALU_ADD;
             imm_sel = IMM_I; 
             alu_a_sel = RS1; 
@@ -146,7 +147,7 @@ module decoder
             jalr = 1;
         end
         
-        7'b0110111: begin //lui                // ADDED (opcode was 7'b0010011)
+        7'b0110111: begin //lui                //  (opcode was 7'b0010011)
             alu_op = ALU_ADD;
             imm_sel = IMM_U; 
             alu_a_sel = ZERO; 

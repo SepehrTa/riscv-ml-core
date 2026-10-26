@@ -17,7 +17,7 @@ import subprocess
 PREFIX  = os.environ.get("RISCV_PREFIX", "riscv-none-elf-")   # tool name prefix
 HERE    = os.path.dirname(os.path.abspath(__file__))
 TESTS   = os.path.join(HERE, "..", "riscv-tests")
-SRC_DIR = os.path.join(TESTS, "isa", "rv32ui")
+SRC_DIR = [os.path.join(TESTS, "isa", "rv32ui"), os.path.join(TESTS, "isa", "rv32um")]
 MACROS  = os.path.join(TESTS, "isa", "macros", "scalar")
 OUT_DIR = os.path.join(HERE, "build")
 
@@ -43,7 +43,7 @@ def bin2mem(bin_path, mem_path):
 os.makedirs(OUT_DIR, exist_ok=True)
 built = []
 
-for src in sorted(glob.glob(os.path.join(SRC_DIR, "*.S"))):
+for src in sorted(f for d in SRC_DIR for f in glob.glob(os.path.join(d, "*.S"))):
     name = os.path.splitext(os.path.basename(src))[0]
     if name in SKIP:
         continue
@@ -52,7 +52,7 @@ for src in sorted(glob.glob(os.path.join(SRC_DIR, "*.S"))):
     data_bin = os.path.join(OUT_DIR, name + ".data.bin")
 
     # 1) compile + link with our environment and memory layout
-    run([PREFIX + "gcc", "-march=rv32i", "-mabi=ilp32", "-nostdlib", "-nostartfiles",
+    run([PREFIX + "gcc", "-march=rv32im", "-mabi=ilp32", "-nostdlib", "-nostartfiles",
          "-T", os.path.join(HERE, "link.ld"),
          "-I", HERE, "-I", MACROS,
          src, "-o", elf])

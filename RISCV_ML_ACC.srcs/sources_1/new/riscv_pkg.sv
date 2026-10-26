@@ -57,6 +57,7 @@ package riscv_pkg;
     typedef enum logic[1:0] {
         ALU_res = 2'd0,
         MEM_res = 2'd1,
-        PC4_res = 2'd2
+        PC4_res = 2'd2,
+		MD_res  = 2'd3
     }result_src_t;
 endpackage

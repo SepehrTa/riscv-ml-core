@@ -32,6 +32,7 @@ module core
     logic[31:0] instr;
     logic[31:0] rs1_val,rs2_val;
     logic [31:0] imm,alu_a, alu_b, alu_result,load_data, wb_value;
+    logic [31:0] md_result;
     logic taken, take_branch;
     imm_sel_t imm_sel;
     alu_op_t alu_op;
@@ -92,8 +93,6 @@ module core
         end
     end
     
-    // ---------------- ADDED from here down ----------------
-
     instr_mem #(.DEPTH(1024), .INIT_FILE("test1.mem"), .SYNC_READ(0)) u_instr_mem(
         .clk(clk), //in
         .en(1'b1), //in
@@ -116,6 +115,13 @@ module core
         .wdata(rs2_val), //in
         .funct3(instr[14:12]), //in
         .rdata(load_data) //out
+    );
+    
+    muldiv u_muldiv(                                  
+        .a(rs1_val), //in
+        .b(rs2_val), //in
+        .funct3(instr[14:12]), //in
+        .out(md_result) //out
     );
 
     // mux A: ALU first input
@@ -143,6 +149,7 @@ module core
             ALU_res: wb_value = alu_result;
             MEM_res: wb_value = load_data;
             PC4_res: wb_value = pc_plus4;
+            MD_res:  wb_value = md_result;
             default: wb_value = alu_result;
         endcase
     end
