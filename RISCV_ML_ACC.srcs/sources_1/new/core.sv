@@ -22,18 +22,22 @@
 
 module core
     import riscv_pkg::*;  
+    #(parameter IMEM_FILE = "test1.mem") 
     (
         input logic clk,
         input logic rst,
-        output logic [31:0] pc_out
+        input logic [3:0] btn,
+        output logic [31:0] pc_out,
+        output logic [3:0] led
     );
     
-    logic[31:0] pc, pc_next, pc_plus4, pc_target;      // CHANGED: removed "= 0" (the reset sets pc)
+    logic[31:0] pc, pc_next, pc_plus4, pc_target;      
     logic[31:0] instr;
     logic[31:0] rs1_val,rs2_val;
     logic [31:0] imm,alu_a, alu_b, alu_result,load_data, wb_value;
     logic [31:0] md_result;
     logic taken, take_branch;
+    logic io_sel;
     imm_sel_t imm_sel;
     alu_op_t alu_op;
     alu_a_sel_t alu_a_sel;
@@ -41,8 +45,9 @@ module core
     logic jal, jalr,branch;
     result_src_t result_src;
     
-    logic reg_write,mem_write;
     
+    logic reg_write,mem_write;
+    assign io_sel = alu_result[31];
     decoder u_decoder(
             .instr_inp(instr),   //in
             .imm_sel(imm_sel), //out
@@ -93,7 +98,14 @@ module core
         end
     end
     
-    instr_mem #(.DEPTH(1024), .INIT_FILE("test1.mem"), .SYNC_READ(0)) u_instr_mem(
+    always_ff @(posedge clk) begin
+        if (rst)
+            led <= 4'b0000;              // LEDs off after reset
+        else if (mem_write & io_sel)
+            led <= rs2_val[3:0];         // a store to the I/O address updates the LEDs
+    end
+    
+    instr_mem #(.DEPTH(1024), .INIT_FILE(IMEM_FILE), .SYNC_READ(0)) u_instr_mem(
         .clk(clk), //in
         .en(1'b1), //in
         .addr(pc), //in
@@ -110,7 +122,7 @@ module core
     data_mem #(.DEPTH(1024), .SYNC_READ(0)) u_data_mem(
         .clk(clk), //in
         .en(1'b1), //in
-        .we(mem_write), //in
+        .we(mem_write & ~io_sel), //in
         .addr(alu_result), //in
         .wdata(rs2_val), //in
         .funct3(instr[14:12]), //in
@@ -147,7 +159,7 @@ module core
     always_comb begin
         case (result_src)
             ALU_res: wb_value = alu_result;
-            MEM_res: wb_value = load_data;
+            MEM_res: wb_value = io_sel ? {28'b0, btn} : load_data;
             PC4_res: wb_value = pc_plus4;
             MD_res:  wb_value = md_result;
             default: wb_value = alu_result;

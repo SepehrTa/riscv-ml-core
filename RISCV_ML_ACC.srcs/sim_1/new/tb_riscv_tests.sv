@@ -30,7 +30,10 @@ module tb_riscv_tests;
     core dut (
         .clk    (clk),
         .rst    (rst),
-        .pc_out (pc_out)
+        .btn    (4'b0),
+        .pc_out (pc_out),
+        .led    ()
+        
     );
 
     task automatic run_test(input string name);

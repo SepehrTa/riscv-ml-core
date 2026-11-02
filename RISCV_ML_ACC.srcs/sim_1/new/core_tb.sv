@@ -25,7 +25,9 @@ module tb_core;
     core dut (
         .clk    (clk),
         .rst    (rst),
-        .pc_out (pc_out)
+        .pc_out (pc_out),
+        .led(),
+        .btn(4'b0)
     );
 
     // 2) Trace: once per cycle (at the falling edge, when everything has
