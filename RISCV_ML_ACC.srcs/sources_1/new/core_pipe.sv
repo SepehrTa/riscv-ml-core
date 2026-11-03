@@ -21,6 +21,31 @@
 
 
 
+`timescale 1ns / 1ps
+//////////////////////////////////////////////////////////////////////////////////
+// Module Name: core_pipe
+// Description: 5-stage pipelined RV32IM core: IF -> ID -> EX -> MEM -> WB.
+//   Same ports and same building blocks as the single-cycle core (core.sv),
+//   so top.sv and the testbenches can use either one.
+//
+//   Hazard handling:
+//     - data hazards : forwarding from the MEM and WB stages into EX
+//     - load-use     : 1-cycle stall (a bubble is inserted into EX)
+//     - divide       : the pipeline waits until the iterative divider is done
+//     - branch/jump  : resolved in EX; the 2 wrong-path instructions
+//                      (in IF and ID) are flushed
+//     - same-cycle register write/read (WB writes while ID reads): bypass in ID
+//
+//   Naming: every signal ends with the stage it belongs to:
+//     _d = ID, _e = EX, _m = MEM, _w = WB   (IF signals have no suffix)
+//
+//   Memories are synchronous-read (SYNC_READ = 1), so Vivado builds them from
+//   block RAM: instruction memory is addressed with pc_next (the instruction
+//   for pc appears one cycle later), and load data arrives in WB.
+//   Divide / remainder use the iterative divider (divider.sv, 34 cycles):
+//   while it works, the divide waits in EX, everything behind it is frozen,
+//   and bubbles go into MEM. Multiply stays combinational (in muldiv).
+//////////////////////////////////////////////////////////////////////////////////
 
 module core_pipe
     import riscv_pkg::*;
@@ -32,26 +57,28 @@ module core_pipe
         output logic [31:0] pc_out,
         output logic [3:0]  led
     );
- 
+
     localparam logic [31:0] NOP = 32'h0000_0013;      // addi x0, x0, 0
- 
+
     // ---------------- signals used across stages (declared up front) ----------------
-    logic        stall;                 // load-use hazard: hold IF and ID for 1 cycle
+    logic        load_use;              // load-use hazard: hold IF and ID for 1 cycle
+    logic        div_stall;             // ADDED: a divide in EX is not finished yet
+    logic        stall;                 // CHANGED: hold IF and ID (load-use or divide)
     logic        redirect;              // taken branch or jump in EX: change the PC, flush IF/ID
     logic [31:0] redirect_target;       // where to go when redirect = 1
- 
+
     logic [4:0]  rd_m, rd_w;            // destination registers in MEM and WB (for forwarding)
     logic        reg_write_m, reg_write_w;
     result_src_t result_src_m;
     logic [31:0] alu_result_m, md_result_m, pc_plus4_m;
     logic [31:0] wb_value;              // value written back in WB
- 
- 
+
+
     //=========================================================================
     // IF: fetch
     //=========================================================================
     logic [31:0] pc, pc_next, instr;    // instr = instruction at pc (block RAM output)
- 
+
     // CHANGED: the next PC is computed first, because the block RAM must be
     // given its address one cycle early. At the clock edge, pc becomes pc_next
     // and the RAM output becomes mem[pc_next], so instr always matches pc.
@@ -61,21 +88,21 @@ module core_pipe
         else if (stall)     pc_next = pc;               // stall: fetch the same instruction again
         else                pc_next = pc + 32'd4;
     end
- 
+
     always_ff @(posedge clk) begin
         pc <= pc_next;
     end
- 
+
     instr_mem #(.DEPTH(1024), .INIT_FILE(IMEM_FILE), .SYNC_READ(1)) u_instr_mem(   // CHANGED: block RAM
         .clk(clk), //in
         .en(1'b1), //in
         .addr(pc_next), //in                            // CHANGED: was pc
         .instr(instr) //out
     );
- 
+
     // ----------------------------- IF/ID register -----------------------------
     logic [31:0] instr_d, pc_d;
- 
+
     always_ff @(posedge clk) begin
         if (rst || redirect) begin      // flush: the wrong-path instruction becomes a NOP
             instr_d <= NOP;
@@ -85,8 +112,8 @@ module core_pipe
             pc_d    <= pc;
         end
     end
- 
- 
+
+
     //=========================================================================
     // ID: decode and read registers
     //=========================================================================
@@ -98,11 +125,11 @@ module core_pipe
     logic        reg_write_d, mem_write_d, branch_d, jal_d, jalr_d;
     logic [31:0] imm_d, rf_rdata1, rf_rdata2, rs1_val_d, rs2_val_d;
     logic [4:0]  rs1_d, rs2_d, rd_d;
- 
+
     assign rs1_d = instr_d[19:15];
     assign rs2_d = instr_d[24:20];
     assign rd_d  = instr_d[11:7];
- 
+
     decoder u_decoder(
             .instr_inp(instr_d),   //in
             .imm_sel(imm_sel_d), //out
@@ -116,13 +143,13 @@ module core_pipe
             .jal(jal_d), //out
             .jalr(jalr_d) //out
     );
- 
+
     imm_gen u_imm_gen(
         .instr(instr_d), //in
         .imm_sel(imm_sel_d), //in
         .imm(imm_d) //out
     );
- 
+
     register_file u_register_file(      // written from WB, read in ID
         .clk(clk),//in
         .we(reg_write_w),//in
@@ -133,12 +160,12 @@ module core_pipe
         .raddr2(rs2_d),//in
         .rdata2(rf_rdata2)  //out
     );
- 
+
     // WB writes a register at the same clock edge that ID reads it, so ID would
     // still see the old value. Bypass: take the value being written instead.
     assign rs1_val_d = (reg_write_w && rd_w != 0 && rd_w == rs1_d) ? wb_value : rf_rdata1;
     assign rs2_val_d = (reg_write_w && rd_w != 0 && rd_w == rs2_d) ? wb_value : rf_rdata2;
- 
+
     // ----------------------------- ID/EX register -----------------------------
     logic [31:0] pc_e, rs1_val_e, rs2_val_e, imm_e;
     logic [4:0]  rs1_e, rs2_e, rd_e;
@@ -148,8 +175,9 @@ module core_pipe
     alu_b_sel_t  alu_b_sel_e;
     result_src_t result_src_e;
     logic        reg_write_e, mem_write_e, branch_e, jal_e, jalr_e;
- 
+
     always_ff @(posedge clk) begin
+      if (rst || !div_stall) begin        // ADDED: a divide waiting in EX holds this register
         // data: always copied forward
         pc_e         <= pc_d;
         rs1_val_e    <= rs1_val_d;
@@ -164,7 +192,7 @@ module core_pipe
         alu_b_sel_e  <= alu_b_sel_d;
         result_src_e <= result_src_d;
         // controls that change state: cleared to insert a bubble (a do-nothing instruction)
-        if (rst || redirect || stall) begin
+        if (rst || redirect || load_use) begin      // CHANGED: was stall
             reg_write_e <= 0;
             mem_write_e <= 0;
             branch_e    <= 0;
@@ -177,17 +205,20 @@ module core_pipe
             jal_e       <= jal_d;
             jalr_e      <= jalr_d;
         end
+      end
     end
- 
- 
+
+
     //=========================================================================
     // EX: execute
     //=========================================================================
     logic [31:0] fwd_m;                 // the value the instruction in MEM will write back
     logic [31:0] src_a, src_b;          // rs1 / rs2 values after forwarding
     logic [31:0] alu_a, alu_b, alu_result_e, md_result_e, pc_target_e;
+    logic [31:0] mul_result_e, div_result_e;    // ADDED
+    logic        is_div_e, div_start, div_busy, div_done;
     logic        taken_e;
- 
+
     always_comb begin
         case (result_src_m)
             PC4_res: fwd_m = pc_plus4_m;
@@ -195,19 +226,19 @@ module core_pipe
             default: fwd_m = alu_result_m;   // (a load in MEM is never forwarded: the stall prevents it)
         endcase
     end
- 
+
     // Forwarding: use the newest value of rs1 / rs2.
     // MEM holds the newer instruction, so it has priority over WB.
     always_comb begin
         if      (reg_write_m && rd_m != 0 && rd_m == rs1_e) src_a = fwd_m;
         else if (reg_write_w && rd_w != 0 && rd_w == rs1_e) src_a = wb_value;
         else                                                src_a = rs1_val_e;
- 
+
         if      (reg_write_m && rd_m != 0 && rd_m == rs2_e) src_b = fwd_m;
         else if (reg_write_w && rd_w != 0 && rd_w == rs2_e) src_b = wb_value;
         else                                                src_b = rs2_val_e;
     end
- 
+
     // mux A: ALU first input
     always_comb begin
         case (alu_a_sel_e)
@@ -217,7 +248,7 @@ module core_pipe
             default: alu_a = src_a;
         endcase
     end
- 
+
     // mux B: ALU second input
     always_comb begin
         case (alu_b_sel_e)
@@ -226,37 +257,57 @@ module core_pipe
             default: alu_b = src_b;
         endcase
     end
- 
+
     alu u_alu(
         .alu_op(alu_op_e),//in
         .inp1(alu_a),//in
         .inp2 (alu_b),//in
         .out(alu_result_e)//out
     );
- 
-    muldiv u_muldiv(
+
+    muldiv u_muldiv(                                  // CHANGED: multiply only
         .a(src_a), //in
         .b(src_b), //in
-        .funct3(funct3_e), //in
-        .out(md_result_e) //out
+        .funct3({1'b0, funct3_e[1:0]}), //in          // bit 2 forced to 0: never a divide
+        .out(mul_result_e) //out
     );
- 
+
+    // ADDED: iterative divider. A div/rem in EX starts it and waits in EX until done.
+    // reg_write_e excludes bubbles (a bubble can carry a divide's other fields).
+    assign is_div_e  = reg_write_e && (result_src_e == MD_res) && funct3_e[2];
+    assign div_start = is_div_e && !div_busy && !div_done;
+    assign div_stall = is_div_e && !div_done;
+
+    divider u_divider(
+        .clk(clk), //in
+        .rst(rst), //in
+        .start(div_start), //in
+        .a(src_a), //in                               // captured at start
+        .b(src_b), //in
+        .funct3(funct3_e), //in
+        .busy(div_busy), //out
+        .done(div_done), //out
+        .out(div_result_e) //out
+    );
+
+    assign md_result_e = funct3_e[2] ? div_result_e : mul_result_e;
+
     branch_comparator u_branch_comparator(
         .a(src_a), //in
         .b(src_b), //in
         .func(funct3_e), //in
         .bout(taken_e) //out
     );
- 
+
     assign pc_target_e     = pc_e + imm_e;
     assign redirect        = (branch_e & taken_e) | jal_e | jalr_e;
     assign redirect_target = jalr_e ? (alu_result_e & ~32'd1) : pc_target_e;
- 
+
     // ----------------------------- EX/MEM register -----------------------------
     logic [31:0] store_data_m;
     logic [2:0]  funct3_m;
     logic        mem_write_m;
- 
+
     always_ff @(posedge clk) begin
         alu_result_m <= alu_result_e;
         md_result_m  <= md_result_e;
@@ -265,7 +316,7 @@ module core_pipe
         rd_m         <= rd_e;
         funct3_m     <= funct3_e;
         result_src_m <= result_src_e;
-        if (rst) begin
+        if (rst || div_stall) begin                 // CHANGED: bubble into MEM while dividing
             reg_write_m <= 0;
             mem_write_m <= 0;
         end else begin
@@ -273,16 +324,16 @@ module core_pipe
             mem_write_m <= mem_write_e;
         end
     end
- 
- 
+
+
     //=========================================================================
     // MEM: data memory and memory-mapped I/O
     //=========================================================================
     logic        io_sel_m;
     logic [31:0] load_data_w;           // CHANGED: block RAM output, valid one cycle later (in WB)
- 
+
     assign io_sel_m = alu_result_m[31];        // address 0x8000_0000 and above = I/O
- 
+
     data_mem #(.DEPTH(1024), .SYNC_READ(1)) u_data_mem(                           // CHANGED: block RAM
         .clk(clk), //in
         .en(1'b1), //in
@@ -292,20 +343,20 @@ module core_pipe
         .funct3(funct3_m), //in
         .rdata(load_data_w) //out                     // arrives in WB
     );
- 
+
     always_ff @(posedge clk) begin             // LED register
         if (rst)
             led <= 4'b0000;
         else if (mem_write_m & io_sel_m)
             led <= store_data_m[3:0];
     end
- 
+
     // ----------------------------- MEM/WB register -----------------------------
     logic [31:0] alu_result_w, md_result_w, pc_plus4_w, mem_data_w;
     logic        io_sel_w;
     logic [3:0]  btn_w;
     result_src_t result_src_w;
- 
+
     always_ff @(posedge clk) begin
         alu_result_w <= alu_result_m;
         md_result_w  <= md_result_m;
@@ -317,13 +368,13 @@ module core_pipe
         if (rst) reg_write_w <= 0;
         else     reg_write_w <= reg_write_m;
     end
- 
- 
+
+
     //=========================================================================
     // WB: write back (the result mux)
     //=========================================================================
     assign mem_data_w = io_sel_w ? {28'b0, btn_w} : load_data_w;   // CHANGED: was done in MEM
- 
+
     always_comb begin
         case (result_src_w)
             ALU_res: wb_value = alu_result_w;
@@ -333,17 +384,14 @@ module core_pipe
             default: wb_value = alu_result_w;
         endcase
     end
- 
- 
-    //=========================================================================
-    // Hazard detection: load-use
-    //=========================================================================
-    // A load in EX gets its data in MEM, one cycle too late for the next
-    // instruction's EX stage. If the instruction in ID reads that register,
-    // hold IF and ID for one cycle and send a bubble into EX.
-    assign stall = reg_write_e && (result_src_e == MEM_res) && (rd_e != 0) &&
-                   ((rd_e == rs1_d) || (rd_e == rs2_d));
- 
+
+
+
+    assign load_use = reg_write_e && (result_src_e == MEM_res) && (rd_e != 0) &&   // CHANGED: was stall
+                      ((rd_e == rs1_d) || (rd_e == rs2_d));
+
+    assign stall = load_use || div_stall;      // ADDED: hold PC and IF/ID for either reason
+
     assign pc_out = pc;
- 
+
 endmodule
