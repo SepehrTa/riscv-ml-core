@@ -215,14 +215,14 @@ module core_pipe
     logic [31:0] fwd_m;                 // the value the instruction in MEM will write back
     logic [31:0] src_a, src_b;          // rs1 / rs2 values after forwarding
     logic [31:0] alu_a, alu_b, alu_result_e, md_result_e, pc_target_e;
-    logic [31:0] mul_result_e, div_result_e;    // ADDED
+    logic [31:0] div_result_e;    
     logic        is_div_e, div_start, div_busy, div_done;
     logic        taken_e;
 
     always_comb begin
         case (result_src_m)
             PC4_res: fwd_m = pc_plus4_m;
-            MD_res:  fwd_m = md_result_m;
+//            MD_res:  fwd_m = md_result_m;
             default: fwd_m = alu_result_m;   // (a load in MEM is never forwarded: the stall prevents it)
         endcase
     end
@@ -265,12 +265,12 @@ module core_pipe
         .out(alu_result_e)//out
     );
 
-    muldiv u_muldiv(                                  // CHANGED: multiply only
-        .a(src_a), //in
-        .b(src_b), //in
-        .funct3({1'b0, funct3_e[1:0]}), //in          // bit 2 forced to 0: never a divide
-        .out(mul_result_e) //out
-    );
+//    muldiv u_muldiv(                                  // CHANGED: multiply only
+//        .a(src_a), //in
+//        .b(src_b), //in
+//        .funct3({1'b0, funct3_e[1:0]}), //in          // bit 2 forced to 0: never a divide
+//        .out(mul_result_e) //out
+//    );
 
     // ADDED: iterative divider. A div/rem in EX starts it and waits in EX until done.
     // reg_write_e excludes bubbles (a bubble can carry a divide's other fields).
@@ -290,7 +290,7 @@ module core_pipe
         .out(div_result_e) //out
     );
 
-    assign md_result_e = funct3_e[2] ? div_result_e : mul_result_e;
+    assign md_result_e = div_result_e;
 
     branch_comparator u_branch_comparator(
         .a(src_a), //in
@@ -305,6 +305,7 @@ module core_pipe
 
     // ----------------------------- EX/MEM register -----------------------------
     logic [31:0] store_data_m;
+    logic [31:0] mul_a_m, mul_b_m;
     logic [2:0]  funct3_m;
     logic        mem_write_m;
 
@@ -312,6 +313,8 @@ module core_pipe
         alu_result_m <= alu_result_e;
         md_result_m  <= md_result_e;
         store_data_m <= src_b;                 // forwarded rs2 = data for a store
+        mul_a_m <= src_a;
+        mul_b_m <= src_b;
         pc_plus4_m   <= pc_e + 32'd4;          // return address for jal / jalr
         rd_m         <= rd_e;
         funct3_m     <= funct3_e;
@@ -331,6 +334,15 @@ module core_pipe
     //=========================================================================
     logic        io_sel_m;
     logic [31:0] load_data_w;           // CHANGED: block RAM output, valid one cycle later (in WB)
+    logic [31:0] mul_result_m, md_value_m;           
+    
+        muldiv u_muldiv(                                  // CHANGED: multiply only
+        .a(src_a), //in
+        .b(src_b), //in
+        .funct3({1'b0, funct3_e[1:0]}), //in          // bit 2 forced to 0: never a divide
+        .out(mul_result_e) //out
+    );
+    assign md_value_m = funct3_m[2] ? md_result_m : mul_result_m;   // divide result or product
 
     assign io_sel_m = alu_result_m[31];        // address 0x8000_0000 and above = I/O
 
@@ -359,7 +371,7 @@ module core_pipe
 
     always_ff @(posedge clk) begin
         alu_result_w <= alu_result_m;
-        md_result_w  <= md_result_m;
+        md_result_w  <= md_value_m;
         pc_plus4_w   <= pc_plus4_m;
         io_sel_w     <= io_sel_m;              // CHANGED: the I/O choice moves to WB,
         btn_w        <= btn;                   //          where the load data now arrives
