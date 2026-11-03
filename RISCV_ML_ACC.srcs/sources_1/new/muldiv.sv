@@ -43,10 +43,12 @@ module muldiv
     // DIVIDE: RISC-V defines results for the two special cases (no traps).
     // ------------------------------------------------------------------
     logic div_by_zero, overflow;
-    assign div_by_zero = (b == 32'd0);
-    assign overflow    = (a == 32'h8000_0000) && (b == 32'hFFFF_FFFF);   // -2^31 / -1
+//    assign div_by_zero = (b == 32'd0);
+//    assign overflow    = (a == 32'h8000_0000) && (b == 32'hFFFF_FFFF);   // -2^31 / -1
 
     always_comb begin
+        assign div_by_zero = (b == 32'd0);
+        assign overflow    = (a == 32'h8000_0000) && (b == 32'hFFFF_FFFF);   // -2^31 / -1
         out = '0;
         case (funct3)
             3'b000: out = product[31:0];                  // mul:   low 32 bits

@@ -27,7 +27,7 @@ module tb_riscv_tests;
 
     always #5 clk = ~clk;
 
-    core dut (
+    core_pipe dut (
         .clk    (clk),
         .rst    (rst),
         .btn    (4'b0),
@@ -56,6 +56,7 @@ module tb_riscv_tests;
         end
 
         // 4) check the result register
+        repeat (5) @(posedge clk);
         gp = dut.u_register_file.mem[3];
         if (cycles >= TIMEOUT) begin
             failed++;
