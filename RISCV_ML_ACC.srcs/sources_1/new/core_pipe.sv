@@ -21,32 +21,6 @@
 
 
 
-`timescale 1ns / 1ps
-//////////////////////////////////////////////////////////////////////////////////
-// Module Name: core_pipe
-// Description: 5-stage pipelined RV32IM core: IF -> ID -> EX -> MEM -> WB.
-//   Same ports and same building blocks as the single-cycle core (core.sv),
-//   so top.sv and the testbenches can use either one.
-//
-//   Hazard handling:
-//     - data hazards : forwarding from the MEM and WB stages into EX
-//     - load-use     : 1-cycle stall (a bubble is inserted into EX)
-//     - divide       : the pipeline waits until the iterative divider is done
-//     - branch/jump  : resolved in EX; the 2 wrong-path instructions
-//                      (in IF and ID) are flushed
-//     - same-cycle register write/read (WB writes while ID reads): bypass in ID
-//
-//   Naming: every signal ends with the stage it belongs to:
-//     _d = ID, _e = EX, _m = MEM, _w = WB   (IF signals have no suffix)
-//
-//   Memories are synchronous-read (SYNC_READ = 1), so Vivado builds them from
-//   block RAM: instruction memory is addressed with pc_next (the instruction
-//   for pc appears one cycle later), and load data arrives in WB.
-//   Divide / remainder use the iterative divider (divider.sv, 34 cycles):
-//   while it works, the divide waits in EX, everything behind it is frozen,
-//   and bubbles go into MEM. Multiply stays combinational (in muldiv).
-//////////////////////////////////////////////////////////////////////////////////
-
 module core_pipe
     import riscv_pkg::*;
     #(parameter IMEM_FILE = "test1.mem")
@@ -125,6 +99,7 @@ module core_pipe
     logic        reg_write_d, mem_write_d, branch_d, jal_d, jalr_d;
     logic [31:0] imm_d, rf_rdata1, rf_rdata2, rs1_val_d, rs2_val_d;
     logic [4:0]  rs1_d, rs2_d, rd_d;
+    logic ml_op_d;
 
     assign rs1_d = instr_d[19:15];
     assign rs2_d = instr_d[24:20];
@@ -141,7 +116,8 @@ module core_pipe
             .result_src(result_src_d),  //out
             .branch(branch_d), //out
             .jal(jal_d), //out
-            .jalr(jalr_d) //out
+            .jalr(jalr_d), //out
+            .ml_op(ml_op_d)
     );
 
     imm_gen u_imm_gen(
@@ -174,7 +150,7 @@ module core_pipe
     alu_a_sel_t  alu_a_sel_e;
     alu_b_sel_t  alu_b_sel_e;
     result_src_t result_src_e;
-    logic        reg_write_e, mem_write_e, branch_e, jal_e, jalr_e;
+    logic        reg_write_e, mem_write_e, branch_e, jal_e, jalr_e, ml_op_e;
 
     always_ff @(posedge clk) begin
       if (rst || !div_stall) begin        // ADDED: a divide waiting in EX holds this register
@@ -198,12 +174,14 @@ module core_pipe
             branch_e    <= 0;
             jal_e       <= 0;
             jalr_e      <= 0;
+            ml_op_e     <= 0;
         end else begin
             reg_write_e <= reg_write_d;
             mem_write_e <= mem_write_d;
             branch_e    <= branch_d;
             jal_e       <= jal_d;
             jalr_e      <= jalr_d;
+            ml_op_e     <= ml_op_d;
         end
       end
     end
@@ -274,7 +252,7 @@ module core_pipe
 
     // ADDED: iterative divider. A div/rem in EX starts it and waits in EX until done.
     // reg_write_e excludes bubbles (a bubble can carry a divide's other fields).
-    assign is_div_e  = reg_write_e && (result_src_e == MD_res) && funct3_e[2];
+    assign is_div_e  = reg_write_e && (result_src_e == MD_res) && funct3_e[2] && !ml_op_e;
     assign div_start = is_div_e && !div_busy && !div_done;
     assign div_stall = is_div_e && !div_done;
 
@@ -307,7 +285,7 @@ module core_pipe
     logic [31:0] store_data_m;
     logic [31:0] mul_a_m, mul_b_m;
     logic [2:0]  funct3_m;
-    logic        mem_write_m;
+    logic        mem_write_m, ml_op_m;
 
     always_ff @(posedge clk) begin
         alu_result_m <= alu_result_e;
@@ -322,9 +300,11 @@ module core_pipe
         if (rst || div_stall) begin                 // CHANGED: bubble into MEM while dividing
             reg_write_m <= 0;
             mem_write_m <= 0;
+            ml_op_m <= 0;
         end else begin
             reg_write_m <= reg_write_e;
             mem_write_m <= mem_write_e;
+            ml_op_m <= ml_op_e;
         end
     end
 
@@ -334,15 +314,28 @@ module core_pipe
     //=========================================================================
     logic        io_sel_m;
     logic [31:0] load_data_w;           // CHANGED: block RAM output, valid one cycle later (in WB)
-    logic [31:0] mul_result_m, md_value_m;           
+    logic [31:0] mul_result_m, md_value_m, ml_result_m;           
     
         muldiv u_muldiv(                                  // CHANGED: multiply only
-        .a(src_a), //in
-        .b(src_b), //in
-        .funct3({1'b0, funct3_e[1:0]}), //in          // bit 2 forced to 0: never a divide
-        .out(mul_result_e) //out
+        .a(mul_a_m), //in
+        .b(mul_b_m), //in
+        .funct3({1'b0, funct3_m[1:0]}), //in          // bit 2 forced to 0: never a divide
+        .out(mul_result_m) //out
     );
-    assign md_value_m = funct3_m[2] ? md_result_m : mul_result_m;   // divide result or product
+    
+    
+    ml_unit u_ml_unit(
+        .clk(clk), //in
+        .rst(rst), //in
+        .valid(ml_op_m), //in                         // 0 for bubbles: the accumulator stays put
+        .funct3(funct3_m), //in
+        .a(mul_a_m), //in
+        .b(mul_b_m), //in
+        .out(ml_result_m) //out
+    );
+    
+    
+    assign md_value_m = ml_op_m ? ml_result_m : funct3_m[2] ? md_result_m : mul_result_m;   // divide result or product
 
     assign io_sel_m = alu_result_m[31];        // address 0x8000_0000 and above = I/O
 
@@ -399,8 +392,8 @@ module core_pipe
 
 
 
-    assign load_use = reg_write_e && (result_src_e == MEM_res) && (rd_e != 0) &&   // CHANGED: was stall
-                      ((rd_e == rs1_d) || (rd_e == rs2_d));
+    assign load_use = reg_write_e && (result_src_e == MEM_res || result_src_e == MD_res) &&   // CHANGED
+                      (rd_e != 0) && ((rd_e == rs1_d) || (rd_e == rs2_d));
 
     assign stall = load_use || div_stall;      // ADDED: hold PC and IF/ID for either reason
 

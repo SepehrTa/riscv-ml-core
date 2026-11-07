@@ -33,11 +33,13 @@ module decoder
             output result_src_t result_src, 
             output logic branch,
             output logic jal,
-            output logic jalr
+            output logic jalr,
+            output logic ml_op //custom op
         );
         
         always_comb begin
         reg_write = 0; mem_write = 0; branch = 0; jal = 0; jalr = 0; alu_op = ALU_ADD; imm_sel = IMM_I;alu_a_sel = RS1; alu_b_sel = RS2; result_src = ALU_res;  // CHANGED: added result_src
+        ml_op = 0;
         case (instr_inp[6:0])
         7'b0110011: begin 
                 imm_sel = IMM_I; 
@@ -171,7 +173,12 @@ module decoder
             jal = 0;
             jalr = 0;
         end
-        
+        7'b0001011: begin
+            ml_op      = 1;
+            result_src = MD_res;    // result arrives late, like a multiply
+            reg_write  = (instr_inp[14:12] == 3'b000) ||    // dot4
+                         (instr_inp[14:12] == 3'b011);      // acc.rd
+        end
         default: begin
         
         end
