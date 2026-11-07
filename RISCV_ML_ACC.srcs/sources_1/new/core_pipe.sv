@@ -47,6 +47,14 @@ module core_pipe
     logic [31:0] alu_result_m, md_result_m, pc_plus4_m;
     logic [31:0] wb_value;              // value written back in WB
 
+    
+    // ADDED: cycle counter, readable with lw from 0x8000_0008
+    logic [31:0] cycle_cnt;
+    always_ff @(posedge clk) begin
+        if (rst) cycle_cnt <= 32'd0;
+        else     cycle_cnt <= cycle_cnt + 32'd1;
+    end
+
 
     //=========================================================================
     // IF: fetch
@@ -359,7 +367,7 @@ module core_pipe
     // ----------------------------- MEM/WB register -----------------------------
     logic [31:0] alu_result_w, md_result_w, pc_plus4_w, mem_data_w;
     logic        io_sel_w;
-    logic [3:0]  btn_w;
+    logic [31:0]  io_rdata_w;
     result_src_t result_src_w;
 
     always_ff @(posedge clk) begin
@@ -367,7 +375,7 @@ module core_pipe
         md_result_w  <= md_value_m;
         pc_plus4_w   <= pc_plus4_m;
         io_sel_w     <= io_sel_m;              // CHANGED: the I/O choice moves to WB,
-        btn_w        <= btn;                   //          where the load data now arrives
+        io_rdata_w   <= (alu_result_m[3:2] == 2'b10) ? cycle_cnt : {28'b0, btn};   // CHANGED: 0x...8 = counter, 0x...4 = buttons                   //          where the load data now arrives
         rd_w         <= rd_m;
         result_src_w <= result_src_m;
         if (rst) reg_write_w <= 0;
@@ -378,7 +386,7 @@ module core_pipe
     //=========================================================================
     // WB: write back (the result mux)
     //=========================================================================
-    assign mem_data_w = io_sel_w ? {28'b0, btn_w} : load_data_w;   // CHANGED: was done in MEM
+    assign mem_data_w = io_sel_w ? io_rdata_w  : load_data_w;   // CHANGED: was done in MEM
 
     always_comb begin
         case (result_src_w)
