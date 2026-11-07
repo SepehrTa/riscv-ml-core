@@ -23,7 +23,12 @@
 
 module core_pipe
     import riscv_pkg::*;
-    #(parameter IMEM_FILE = "test1.mem")
+    #(    
+        parameter IMEM_FILE = "test1.mem",
+        parameter DMEM_FILE = "",
+        parameter int IMEM_DEPTH = 1024,
+        parameter int DMEM_DEPTH = 16384
+    )
     (
         input  logic        clk,
         input  logic        rst,
@@ -75,7 +80,7 @@ module core_pipe
         pc <= pc_next;
     end
 
-    instr_mem #(.DEPTH(1024), .INIT_FILE(IMEM_FILE), .SYNC_READ(1)) u_instr_mem(   // CHANGED: block RAM
+    instr_mem #(.DEPTH(IMEM_DEPTH), .INIT_FILE(IMEM_FILE), .SYNC_READ(1)) u_instr_mem(   // CHANGED: block RAM
         .clk(clk), //in
         .en(1'b1), //in
         .addr(pc_next), //in                            // CHANGED: was pc
@@ -347,7 +352,7 @@ module core_pipe
 
     assign io_sel_m = alu_result_m[31];        // address 0x8000_0000 and above = I/O
 
-    data_mem #(.DEPTH(1024), .SYNC_READ(1)) u_data_mem(                           // CHANGED: block RAM
+    data_mem #(.DEPTH(DMEM_DEPTH),.INIT_FILE(DMEM_FILE) , .SYNC_READ(1)) u_data_mem(                           // CHANGED: block RAM
         .clk(clk), //in
         .en(1'b1), //in
         .we(mem_write_m & ~io_sel_m), //in

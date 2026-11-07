@@ -16,3 +16,9 @@ sw/rvtest/build/
 *.elf
 *.o
 *.bin
+sw/mnist/data/
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/

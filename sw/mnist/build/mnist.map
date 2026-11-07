@@ -1,0 +1,120 @@
+
+Discarded input sections
+
+ .text          0x00000000        0x0 C:\FPGA\RISCV_ML_ACC\sw\mnist\build\crt0.o
+ .data          0x00000000        0x0 C:\FPGA\RISCV_ML_ACC\sw\mnist\build\crt0.o
+ .bss           0x00000000        0x0 C:\FPGA\RISCV_ML_ACC\sw\mnist\build\crt0.o
+ .riscv.attributes
+                0x00000000       0x28 C:\FPGA\RISCV_ML_ACC\sw\mnist\build\crt0.o
+ .text          0x00000000        0x0 C:\FPGA\RISCV_ML_ACC\sw\mnist\build\mnist.o
+ .data          0x00000000        0x0 C:\FPGA\RISCV_ML_ACC\sw\mnist\build\mnist.o
+ .bss           0x00000000        0x0 C:\FPGA\RISCV_ML_ACC\sw\mnist\build\mnist.o
+ .comment       0x00000000       0x34 C:\FPGA\RISCV_ML_ACC\sw\mnist\build\mnist.o
+ .note.GNU-stack
+                0x00000000        0x0 C:\FPGA\RISCV_ML_ACC\sw\mnist\build\mnist.o
+ .riscv.attributes
+                0x00000000       0x2a C:\FPGA\RISCV_ML_ACC\sw\mnist\build\mnist.o
+
+Memory Configuration
+
+Name             Origin             Length             Attributes
+IMEM             0x00000000         0x00001000         xr
+DMEM             0x00010000         0x00010000         rw
+*default*        0x00000000         0xffffffff
+
+Linker script and memory map
+
+LOAD C:\FPGA\RISCV_ML_ACC\sw\mnist\build\crt0.o
+LOAD C:\FPGA\RISCV_ML_ACC\sw\mnist\build\mnist.o
+LOAD C:/tools/xpack-riscv-none-elf-gcc-15.2.0-1/bin/../lib/gcc/riscv-none-elf/15.2.0/rv32im/ilp32\libgcc.a
+                0x00001000                        STACK_BYTES = 0x1000
+                0x00000000                        . = ORIGIN (IMEM)
+
+.text           0x00000000      0x594
+ *(.text.start)
+ .text.start    0x00000000       0x3c C:\FPGA\RISCV_ML_ACC\sw\mnist\build\crt0.o
+                0x00000000                _start
+ *(.text .text.*)
+ .text.startup.main
+                0x0000003c      0x558 C:\FPGA\RISCV_ML_ACC\sw\mnist\build\mnist.o
+                0x0000003c                main
+                0x00010000                        . = ORIGIN (DMEM)
+
+.rodata         0x00010000     0x9778
+ *(.rodata .rodata.*)
+ .rodata.TEST_LOGITS
+                0x00010000      0x280 C:\FPGA\RISCV_ML_ACC\sw\mnist\build\mnist.o
+                0x00010000                TEST_LOGITS
+ .rodata.TEST_Y
+                0x00010280       0x10 C:\FPGA\RISCV_ML_ACC\sw\mnist\build\mnist.o
+                0x00010280                TEST_Y
+ .rodata.TEST_X
+                0x00010290     0x3100 C:\FPGA\RISCV_ML_ACC\sw\mnist\build\mnist.o
+                0x00010290                TEST_X
+ .rodata.B2     0x00013390       0x28 C:\FPGA\RISCV_ML_ACC\sw\mnist\build\mnist.o
+                0x00013390                B2
+ .rodata.W2     0x000133b8      0x140 C:\FPGA\RISCV_ML_ACC\sw\mnist\build\mnist.o
+                0x000133b8                W2
+ .rodata.B1     0x000134f8       0x80 C:\FPGA\RISCV_ML_ACC\sw\mnist\build\mnist.o
+                0x000134f8                B1
+ .rodata.W1     0x00013578     0x6200 C:\FPGA\RISCV_ML_ACC\sw\mnist\build\mnist.o
+                0x00013578                W1
+ *(.srodata .srodata.*)
+
+.rela.dyn       0x00019778        0x0
+ .rela.text.start
+                0x00019778        0x0 C:\FPGA\RISCV_ML_ACC\sw\mnist\build\crt0.o
+
+.data
+ *(.data .data.*)
+ *(.sdata .sdata.*)
+                0x00019778                        __data_end = ALIGN (0x4)
+
+.bss            0x00019778      0x5b0
+                0x00019778                        __bss_start = .
+ *(.bss .bss.*)
+ .bss.correct_dot4
+                0x00019778        0x4 C:\FPGA\RISCV_ML_ACC\sw\mnist\build\mnist.o
+                0x00019778                correct_dot4
+ .bss.correct_scalar
+                0x0001977c        0x4 C:\FPGA\RISCV_ML_ACC\sw\mnist\build\mnist.o
+                0x0001977c                correct_scalar
+ .bss.first_error
+                0x00019780        0x4 C:\FPGA\RISCV_ML_ACC\sw\mnist\build\mnist.o
+                0x00019780                first_error
+ .bss.mismatch_count
+                0x00019784        0x4 C:\FPGA\RISCV_ML_ACC\sw\mnist\build\mnist.o
+                0x00019784                mismatch_count
+ .bss.dot4_predictions
+                0x00019788       0x10 C:\FPGA\RISCV_ML_ACC\sw\mnist\build\mnist.o
+                0x00019788                dot4_predictions
+ .bss.scalar_predictions
+                0x00019798       0x10 C:\FPGA\RISCV_ML_ACC\sw\mnist\build\mnist.o
+                0x00019798                scalar_predictions
+ .bss.dot4_logits
+                0x000197a8      0x280 C:\FPGA\RISCV_ML_ACC\sw\mnist\build\mnist.o
+                0x000197a8                dot4_logits
+ .bss.scalar_logits
+                0x00019a28      0x280 C:\FPGA\RISCV_ML_ACC\sw\mnist\build\mnist.o
+                0x00019a28                scalar_logits
+ .bss.dot4_cycles
+                0x00019ca8       0x40 C:\FPGA\RISCV_ML_ACC\sw\mnist\build\mnist.o
+                0x00019ca8                dot4_cycles
+ .bss.scalar_cycles
+                0x00019ce8       0x40 C:\FPGA\RISCV_ML_ACC\sw\mnist\build\mnist.o
+                0x00019ce8                scalar_cycles
+ *(.sbss .sbss.*)
+ *(COMMON)
+                0x00019d28                        . = ALIGN (0x4)
+                0x00019d28                        __bss_end = .
+                0x00020000                        __stack_top = (ORIGIN (DMEM) + LENGTH (DMEM))
+                0x0001f000                        __stack_limit = (__stack_top - STACK_BYTES)
+
+/DISCARD/
+ *(.comment)
+ *(.note .note.*)
+ *(.eh_frame .eh_frame.*)
+ *(.riscv.attributes)
+                0x00000001                        ASSERT ((SIZEOF (.text) <= LENGTH (IMEM)), MNIST program exceeds 4 KiB IMEM: increase IMEM_DEPTH)
+                0x00000001                        ASSERT ((__bss_end <= __stack_limit), MNIST data/BSS overlaps reserved 4 KiB stack)
+OUTPUT(C:\FPGA\RISCV_ML_ACC\sw\mnist\build\mnist.elf elf32-littleriscv)

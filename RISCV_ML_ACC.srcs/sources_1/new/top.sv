@@ -56,7 +56,13 @@ module top (
     end
 
     // 4) The core, loaded with the LED program
-    core_pipe #(.IMEM_FILE("bench_dot.text.mem")) u_core (
+    core_pipe #(
+    .IMEM_FILE("mnist_imem.mem"),
+    .DMEM_FILE("mnist_dmem.mem"),
+    .IMEM_DEPTH(1024),
+    .DMEM_DEPTH(16384)
+    ) 
+    u_core (
         .clk    (clk),
         .rst    (rst),
         .btn    (btn_sync),
