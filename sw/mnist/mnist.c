@@ -35,6 +35,7 @@ _Static_assert(sizeof(TEST_LOGITS) == N_TEST * N_OUT * 4, "TEST_LOGITS shape mis
 
 #define CYCLE_COUNTER ((volatile uint32_t *)(uintptr_t)0x80000008u)
 #define LED_REG       ((volatile uint32_t *)(uintptr_t)0x80000000u)
+#define BTN_REG       ((volatile uint32_t *)(uintptr_t)0x80000004u)
 
 /* Volatile ensures these fields remain observable in the Vivado testbench. */
 volatile uint32_t scalar_cycles[N_TEST];
@@ -204,7 +205,20 @@ static void record_mismatch(uint32_t test, uint32_t output, uint32_t mode)
     if (mismatch_count == 0) first_error = code;
     ++mismatch_count;
 }
+static inline uint32_t read_buttons(void)
+{
+	#ifdef __riscv
+		return *BTN_REG;
+	#else
+		return 0;
+	#endif
+}
 
+static inline void wait_cycles(uint32_t n)
+{
+    uint32_t start = read_cycles();
+    while (read_cycles() - start < n);
+}
 int main(void)
 {
     mismatch_count = 0;
@@ -240,5 +254,23 @@ int main(void)
         }
     }
     write_led(mismatch_count ? 0xFu : 0x1u);
+	#ifdef BOARD
+		/* Board demo: LEDs show the predicted digit, BTN1 steps to the next
+		 * image.  On a failed self-check, the LEDs stay at 1111. */
+		if (mismatch_count)
+			for (;;)
+				;
+		for (uint32_t t = 0;; t = (t + 1) % N_TEST) {
+			int32_t logits[N_OUT];
+			infer_dot4(TEST_X[t], logits);
+			write_led(argmax(logits));
+			while (!(read_buttons() & 0x2u))    /* wait for BTN1 press   */
+				;
+			wait_cycles(1300000u);              /* 20 ms: contact bounce */
+			while (read_buttons() & 0x2u)       /* wait for release      */
+				;
+			wait_cycles(1300000u);
+		}
+	#endif
     return (int)(mismatch_count ? first_error : 1u);
 }

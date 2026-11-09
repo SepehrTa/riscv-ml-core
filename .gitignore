@@ -22,3 +22,9 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
+
+
+vivado_pid*.zip
+dfx_runtime.txt
+RISCV_ML_ACC.srcs/utils_1/
+*.map

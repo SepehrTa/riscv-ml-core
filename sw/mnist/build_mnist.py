@@ -47,6 +47,9 @@ def bin_to_mem(source, destination, capacity):
 
 
 def main():
+    board = "--board" in sys.argv
+    tag = "mnist_board" if board else "mnist"
+
     if not (HERE / "mnist_model.h").is_file():
         sys.exit("Missing sw/mnist/mnist_model.h. Run train_mnist.py first and commit the header.")
     BUILD.mkdir(parents=True, exist_ok=True)
@@ -61,10 +64,12 @@ def main():
         "-fno-jump-tables", "-ffunction-sections", "-fdata-sections",
         "-Wall", "-Wextra", "-Wno-missing-braces", "-Werror",
     ]
+    if board:
+        flags.append("-DBOARD")
     gcc, objcopy = PREFIX + "gcc", PREFIX + "objcopy"
     crt_obj, c_obj = BUILD / "crt0.o", BUILD / "mnist.o"
-    elf = BUILD / "mnist.elf"
-    mapfile = BUILD / "mnist.map"
+    elf = BUILD / f"{tag}.elf"
+    mapfile = BUILD / f"{tag}.map"
 
     run(gcc, "-march=rv32im", "-mabi=ilp32", "-mno-relax", "-c", HERE / "crt0.s", "-o", crt_obj)
     run(gcc, *flags, "-c", HERE / "mnist.c", "-o", c_obj)
@@ -76,15 +81,12 @@ def main():
     # .text starts at address zero.  .rodata and .data are contiguous in
     # DMEM, starting at 0x10000; objcopy fills any alignment gaps with zero.
     # .bss is NOLOAD and is explicitly zeroed by crt0.s on reset.
-    imem_bin, dmem_bin = BUILD / "mnist_imem.bin", BUILD / "mnist_dmem.bin"
+    imem_bin, dmem_bin = BUILD / f"{tag}_imem.bin", BUILD / f"{tag}_dmem.bin"
     run(objcopy, "-O", "binary", "-j", ".text", elf, imem_bin)
     run(objcopy, "-O", "binary", "-j", ".rodata", "-j", ".data", elf, dmem_bin)
-    bin_to_mem(imem_bin, BUILD / "mnist_imem.mem", IMEM_BYTES)
-    bin_to_mem(dmem_bin, BUILD / "mnist_dmem.mem", DMEM_BYTES)
-    print("\nPASS: Firmware linked and BRAM images created.")
-    print("The current core_pipe still needs DMEM_DEPTH=16384, a DMEM_FILE")
-    print("parameter, and a testbench/top that loads both .mem images.")
-
+    bin_to_mem(imem_bin, BUILD / f"{tag}_imem.mem", IMEM_BYTES)
+    bin_to_mem(dmem_bin, BUILD / f"{tag}_dmem.mem", DMEM_BYTES)
+    print(f"\nPASS: Firmware linked and BRAM images created ({tag}_imem.mem, {tag}_dmem.mem).")
 
 if __name__ == "__main__":
     main()

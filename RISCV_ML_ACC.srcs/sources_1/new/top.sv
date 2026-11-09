@@ -57,8 +57,8 @@ module top (
 
     // 4) The core, loaded with the LED program
     core_pipe #(
-    .IMEM_FILE("mnist_imem.mem"),
-    .DMEM_FILE("mnist_dmem.mem"),
+    .IMEM_FILE("mnist_board_imem.mem"),
+    .DMEM_FILE("mnist_board_dmem.mem"),
     .IMEM_DEPTH(1024),
     .DMEM_DEPTH(16384)
     ) 
