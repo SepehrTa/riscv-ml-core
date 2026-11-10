@@ -108,8 +108,19 @@ static inline int32_t scalar_dot(const int8_t *a, const int8_t *b,
                                  uint32_t count, int32_t bias)
 {
     int32_t acc = bias;
+#ifdef UNROLL
+    /* ADDED: unrolled by 4 (count is a multiple of four): the same work with
+     * a quarter of the loop overhead.  Fair baseline for the unrolled dot4. */
+    for (uint32_t i = 0; i < count; i += 4) {
+        acc += (int32_t)a[i]     * (int32_t)b[i];
+        acc += (int32_t)a[i + 1] * (int32_t)b[i + 1];
+        acc += (int32_t)a[i + 2] * (int32_t)b[i + 2];
+        acc += (int32_t)a[i + 3] * (int32_t)b[i + 3];
+    }
+#else
     for (uint32_t i = 0; i < count; ++i)
         acc += (int32_t)a[i] * (int32_t)b[i];
+#endif
     return acc;
 }
 
@@ -160,8 +171,27 @@ static inline int32_t accelerated_dot(const int8_t *a, const int8_t *b,
                                       uint32_t count, int32_t bias)
 {
     ml_acc_set(bias);
+#ifdef UNROLL
+    /* ADDED: unrolled by 4.  All eight words are loaded first, then the four
+     * dot4.acc run back to back: no dot4.acc waits for the load just before
+     * it, and the loop overhead is paid once per 16 multiply-adds. */
+    uint32_t i = 0;
+    for (; i + 16 <= count; i += 16) {
+        uint32_t a0 = packed4(a + i),      b0 = packed4(b + i);
+        uint32_t a1 = packed4(a + i + 4),  b1 = packed4(b + i + 4);
+        uint32_t a2 = packed4(a + i + 8),  b2 = packed4(b + i + 8);
+        uint32_t a3 = packed4(a + i + 12), b3 = packed4(b + i + 12);
+        ml_dot4_acc(a0, b0);
+        ml_dot4_acc(a1, b1);
+        ml_dot4_acc(a2, b2);
+        ml_dot4_acc(a3, b3);
+    }
+    for (; i < count; i += 4)               /* leftover groups of four, if any */
+        ml_dot4_acc(packed4(a + i), packed4(b + i));
+#else
     for (uint32_t i = 0; i < count; i += 4)
         ml_dot4_acc(packed4(a + i), packed4(b + i));
+#endif
     return ml_acc_rd();
 }
 
