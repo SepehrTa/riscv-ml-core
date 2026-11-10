@@ -19,18 +19,19 @@
 // 
 //////////////////////////////////////////////////////////////////////////////////
 
-
 module tb_bench;
     parameter string BUILD_DIR = "C:/FPGA/RISCV_ML_ACC/sw/rvtest/build";
     logic clk = 1'b0, rst = 1'b1;
     logic [3:0] led;
     int cycles;
     logic [31:0] plain, plain_unr, simple, unrolled;
-
+ 
     always #5 clk = ~clk;
-
-    core_pipe dut (.clk(clk), .rst(rst), .btn(4'b0), .pc_out(), .led(led));
-
+ 
+    core_pipe dut (.clk(clk), .rst(rst), .btn(4'b0), .pc_out(), .led(led),
+                    .imem_b_en(1'b0), .imem_b_we(4'b0), .imem_b_addr(32'b0), .imem_b_wdata(32'b0), .imem_b_rdata(),
+                    .dmem_b_en(1'b0), .dmem_b_we(4'b0), .dmem_b_addr(32'b0), .dmem_b_wdata(32'b0), .dmem_b_rdata());
+ 
     initial begin
         $readmemh({BUILD_DIR, "/bench_dot.text.mem"}, dut.u_instr_mem.mem);
         $readmemh({BUILD_DIR, "/bench_dot.data.mem"}, dut.u_data_mem.mem);

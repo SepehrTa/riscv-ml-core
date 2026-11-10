@@ -1,0 +1,492 @@
+diff --git a/RISCV_ML_ACC.srcs/sim_1/new/tb_bench.sv b/RISCV_ML_ACC.srcs/sim_1/new/tb_bench.sv
+index 7e8878f..5b97052 100644
+--- a/RISCV_ML_ACC.srcs/sim_1/new/tb_bench.sv
++++ b/RISCV_ML_ACC.srcs/sim_1/new/tb_bench.sv
+@@ -29,7 +29,10 @@ module tb_bench;
+ 
+     always #5 clk = ~clk;
+ 
+-    core_pipe dut (.clk(clk), .rst(rst), .btn(4'b0), .pc_out(), .led(led));
++    core_pipe dut (.clk(clk), .rst(rst), .btn(4'b0), .pc_out(), .led(led),
++                    // ADDED: memory port B unused here (the ARM side drives it on the board)
++                    .imem_b_en(1'b0), .imem_b_we(4'b0), .imem_b_addr(32'b0), .imem_b_wdata(32'b0), .imem_b_rdata(),
++                    .dmem_b_en(1'b0), .dmem_b_we(4'b0), .dmem_b_addr(32'b0), .dmem_b_wdata(32'b0), .dmem_b_rdata());
+ 
+     initial begin
+         $readmemh({BUILD_DIR, "/bench_dot.text.mem"}, dut.u_instr_mem.mem);
+diff --git a/RISCV_ML_ACC.srcs/sim_1/new/tb_loader.sv b/RISCV_ML_ACC.srcs/sim_1/new/tb_loader.sv
+new file mode 100644
+index 0000000..b75860a
+--- /dev/null
++++ b/RISCV_ML_ACC.srcs/sim_1/new/tb_loader.sv
+@@ -0,0 +1,201 @@
++`timescale 1ns / 1ps
++//////////////////////////////////////////////////////////////////////////////////
++// Module Name: tb_loader
++// Description: Does in simulation what the ARM will do on the board (M1):
++//   1. hold the core in reset
++//   2. check port B byte enables on a spare data-memory word
++//   3. write the MNIST program and data through port B only, one word at a
++//      time, the way the AXI BRAM Controller will
++//   4. read both memories back through port B and compare with the files
++//   5. release reset and run the firmware to its final "j ."
++//   6. check gp and the LEDs, check that the constants in data memory are
++//      unchanged, and read the cycle counts through port B
++//////////////////////////////////////////////////////////////////////////////////
++
++module tb_loader;
++    parameter string BUILD_DIR = "C:/FPGA/RISCV_ML_ACC/sw/mnist/build";
++    parameter int unsigned TIMEOUT_CYCLES = 30_000_000;
++    parameter int unsigned PROGRESS_EVERY = 1_000_000;
++    // Optional: per-image cycle arrays (ELF symbols, as in tb_mnist); 0 = skip
++    parameter logic [31:0] SCALAR_CYCLES_ADDR = 32'h00019ce8;
++    parameter logic [31:0] DOT4_CYCLES_ADDR   = 32'h00019ca8;
++
++    localparam int IMEM_DEPTH = 1024;              // words (4 KB)
++    localparam int DMEM_DEPTH = 16384;             // words (64 KB)
++    localparam int N_TEST = 16;
++    localparam logic [31:0] DMEM_BASE = 32'h0001_0000;
++    localparam bit IMEM = 1'b0, DMEM = 1'b1;       // which memory a port B access goes to
++
++    logic clk = 1'b0;
++    logic rst = 1'b1;
++    logic [31:0] pc_out;
++    logic [3:0]  led;
++
++    // port B of both memories, driven by this testbench (the "ARM")
++    logic        imem_b_en = 1'b0, dmem_b_en = 1'b0;
++    logic [3:0]  imem_b_we = 4'b0, dmem_b_we = 4'b0;
++    logic [31:0] imem_b_addr = '0, dmem_b_addr = '0;
++    logic [31:0] imem_b_wdata = '0, dmem_b_wdata = '0;
++    logic [31:0] imem_b_rdata, dmem_b_rdata;
++
++    // the program images, read from the files into the testbench (not into the core)
++    logic [31:0] imem_img [IMEM_DEPTH];
++    logic [31:0] dmem_img [DMEM_DEPTH];
++    int imem_words, dmem_words;
++
++    int unsigned cycles;
++    bit halted;
++    int errors = 0;
++    logic [31:0] value, gp, c_scalar, c_dot4;
++    longint unsigned sum_scalar, sum_dot4;
++
++    always #5 clk = ~clk;
++
++    core_pipe #(
++        .IMEM_FILE(""),
++        .DMEM_FILE(""),
++        .IMEM_DEPTH(IMEM_DEPTH),
++        .DMEM_DEPTH(DMEM_DEPTH)
++    ) dut (
++        .clk(clk),
++        .rst(rst),
++        .btn(4'b0),
++        .pc_out(pc_out),
++        .led(led),
++        .imem_b_en(imem_b_en), .imem_b_we(imem_b_we), .imem_b_addr(imem_b_addr),
++        .imem_b_wdata(imem_b_wdata), .imem_b_rdata(imem_b_rdata),
++        .dmem_b_en(dmem_b_en), .dmem_b_we(dmem_b_we), .dmem_b_addr(dmem_b_addr),
++        .dmem_b_wdata(dmem_b_wdata), .dmem_b_rdata(dmem_b_rdata)
++    );
++
++    // ------------------------------------------------------------------
++    // Port B accesses, as the AXI BRAM Controller makes them.
++    // byte_addr is the offset inside the memory (0 = first word).
++    // Signals change on the falling edge; the RAM acts on the rising edge.
++    // ------------------------------------------------------------------
++    task automatic port_b_write(input bit mem, input logic [31:0] byte_addr,
++                                input logic [31:0] data, input logic [3:0] we);
++        @(negedge clk);
++        if (mem == DMEM) begin
++            dmem_b_en = 1'b1; dmem_b_we = we; dmem_b_addr = byte_addr; dmem_b_wdata = data;
++        end else begin
++            imem_b_en = 1'b1; imem_b_we = we; imem_b_addr = byte_addr; imem_b_wdata = data;
++        end
++        @(negedge clk);                            // the rising edge in between wrote it
++        dmem_b_en = 1'b0; dmem_b_we = 4'b0;
++        imem_b_en = 1'b0; imem_b_we = 4'b0;
++    endtask
++
++    task automatic port_b_read(input bit mem, input logic [31:0] byte_addr,
++                               output logic [31:0] data);
++        @(negedge clk);
++        if (mem == DMEM) begin
++            dmem_b_en = 1'b1; dmem_b_we = 4'b0; dmem_b_addr = byte_addr;
++        end else begin
++            imem_b_en = 1'b1; imem_b_we = 4'b0; imem_b_addr = byte_addr;
++        end
++        @(negedge clk);                            // data arrived on the rising edge
++        data = (mem == DMEM) ? dmem_b_rdata : imem_b_rdata;
++        dmem_b_en = 1'b0;
++        imem_b_en = 1'b0;
++    endtask
++
++    // compare every loaded word with the file, through port B
++    task automatic check_readback(input bit mem, input string what);
++        int bad = 0;
++        int n = (mem == DMEM) ? dmem_words : imem_words;
++        for (int i = 0; i < n; i++) begin
++            port_b_read(mem, 4 * i, value);
++            if (value !== ((mem == DMEM) ? dmem_img[i] : imem_img[i])) begin
++                if (bad < 5)
++                    $display("  %s word %0d: read %08h, expected %08h", what, i, value,
++                             (mem == DMEM) ? dmem_img[i] : imem_img[i]);
++                bad++;
++            end
++        end
++        $display("%-32s %0d words, %0d mismatches", what, n, bad);
++        errors += bad;
++    endtask
++
++    initial begin
++        // 1) the core stays in reset while the "ARM" loads the memories
++        rst = 1'b1;
++        for (int i = 0; i < IMEM_DEPTH; i++) imem_img[i] = 'x;
++        for (int i = 0; i < DMEM_DEPTH; i++) dmem_img[i] = 'x;
++        $readmemh({BUILD_DIR, "/mnist_imem.mem"}, imem_img);
++        $readmemh({BUILD_DIR, "/mnist_dmem.mem"}, dmem_img);
++        imem_words = 0; while (imem_words < IMEM_DEPTH && !$isunknown(imem_img[imem_words])) imem_words++;
++        dmem_words = 0; while (dmem_words < DMEM_DEPTH && !$isunknown(dmem_img[dmem_words])) dmem_words++;
++        $display("Loader: %0d instruction words, %0d data words from %s", imem_words, dmem_words, BUILD_DIR);
++        if (imem_words == 0 || dmem_words == 0)
++            $fatal(1, "Loader: empty .mem files; check BUILD_DIR");
++
++        // 2) byte enables: only bytes 0 and 2 may change
++        port_b_write(DMEM, 32'h0000_FFFC, 32'hAABB_CCDD, 4'b1111);
++        port_b_write(DMEM, 32'h0000_FFFC, 32'h1122_3344, 4'b0101);
++        port_b_read (DMEM, 32'h0000_FFFC, value);
++        if (value !== 32'hAA22_CC44) begin
++            $display("Byte enables: FAIL, read %08h, expected aa22cc44", value);
++            errors++;
++        end else
++            $display("Byte enables: PASS (aabbccdd, then 11223344 with we=0101 -> aa22cc44)");
++
++        // 3) load both memories through port B only
++        for (int i = 0; i < imem_words; i++) port_b_write(IMEM, 4 * i, imem_img[i], 4'b1111);
++        for (int i = 0; i < dmem_words; i++) port_b_write(DMEM, 4 * i, dmem_img[i], 4'b1111);
++
++        // 4) read everything back through port B
++        check_readback(IMEM, "Instruction memory readback:");
++        check_readback(DMEM, "Data memory readback:");
++        if (errors != 0)
++            $fatal(1, "Loader FAIL: port B write/read errors before the run");
++
++        // 5) release reset and run to the final "j ." (same check as tb_mnist)
++        @(negedge clk);
++        rst = 1'b0;
++        cycles = 0;
++        halted = 0;
++        while (!halted && cycles < TIMEOUT_CYCLES) begin
++            @(negedge clk);
++            cycles++;
++            if ((dut.jal_e === 1'b1) && (dut.redirect === 1'b1) &&
++                (dut.redirect_target === dut.pc_e))
++                halted = 1;
++            if (PROGRESS_EVERY != 0 && (cycles % PROGRESS_EVERY) == 0)
++                $display("[PROGRESS] cycles=%0d PC=%08h", cycles, pc_out);
++        end
++        if (!halted)
++            $fatal(1, "Loader FAIL: timed out at %0d cycles, PC=%08h", cycles, pc_out);
++        repeat (12) @(negedge clk);                // let mv gp,a0 reach WB
++
++        // 6) results
++        gp = dut.u_register_file.mem[3];
++        $display("Firmware finished after %0d cycles: gp = %08h, LEDs = %04b", cycles, gp, led);
++        if (gp !== 32'd1 || led !== 4'h1) begin
++            $display("  firmware reported a failure");
++            errors++;
++        end
++        check_readback(DMEM, "Constants after the run:");
++
++        if (SCALAR_CYCLES_ADDR != 32'h0 && DOT4_CYCLES_ADDR != 32'h0) begin
++            sum_scalar = 0;
++            sum_dot4   = 0;
++            for (int i = 0; i < N_TEST; i++) begin
++                port_b_read(DMEM, SCALAR_CYCLES_ADDR - DMEM_BASE + 4 * i, c_scalar);
++                port_b_read(DMEM, DOT4_CYCLES_ADDR   - DMEM_BASE + 4 * i, c_dot4);
++                sum_scalar += c_scalar;
++                sum_dot4   += c_dot4;
++            end
++            if (sum_dot4 != 0)
++                $display("Cycles read through port B: RV32IM %0d, DOT4 %0d per image (%.2fx)",
++                         sum_scalar / N_TEST, sum_dot4 / N_TEST,
++                         real'(sum_scalar) / real'(sum_dot4));
++        end
++
++        if (errors == 0)
++            $display("*** LOADER PASS: program loaded and results read through port B ***");
++        else
++            $display("*** LOADER FAIL: %0d errors ***", errors);
++        $finish;
++    end
++endmodule
+diff --git a/RISCV_ML_ACC.srcs/sim_1/new/tb_mnist.sv b/RISCV_ML_ACC.srcs/sim_1/new/tb_mnist.sv
+index 146883f..42480cf 100644
+--- a/RISCV_ML_ACC.srcs/sim_1/new/tb_mnist.sv
++++ b/RISCV_ML_ACC.srcs/sim_1/new/tb_mnist.sv
+@@ -73,7 +73,10 @@ end
+         .rst(rst),
+         .btn(4'b0),
+         .pc_out(pc_out),
+-        .led(led)
++        .led(led),
++        // ADDED: memory port B unused here (the ARM side drives it on the board)
++        .imem_b_en(1'b0), .imem_b_we(4'b0), .imem_b_addr(32'b0), .imem_b_wdata(32'b0), .imem_b_rdata(),
++        .dmem_b_en(1'b0), .dmem_b_we(4'b0), .dmem_b_addr(32'b0), .dmem_b_wdata(32'b0), .dmem_b_rdata()
+     );
+ 
+     initial begin
+diff --git a/RISCV_ML_ACC.srcs/sim_1/new/tb_riscv_tests.sv b/RISCV_ML_ACC.srcs/sim_1/new/tb_riscv_tests.sv
+index 5e45ab1..49bf2be 100644
+--- a/RISCV_ML_ACC.srcs/sim_1/new/tb_riscv_tests.sv
++++ b/RISCV_ML_ACC.srcs/sim_1/new/tb_riscv_tests.sv
+@@ -32,8 +32,10 @@ module tb_riscv_tests;
+         .rst    (rst),
+         .btn    (4'b0),
+         .pc_out (pc_out),
+-        .led    ()
+-        
++        .led    (),
++        // ADDED: memory port B unused here (the ARM side drives it on the board)
++        .imem_b_en(1'b0), .imem_b_we(4'b0), .imem_b_addr(32'b0), .imem_b_wdata(32'b0), .imem_b_rdata(),
++        .dmem_b_en(1'b0), .dmem_b_we(4'b0), .dmem_b_addr(32'b0), .dmem_b_wdata(32'b0), .dmem_b_rdata()
+     );
+ 
+     task automatic run_test(input string name);
+diff --git a/RISCV_ML_ACC.srcs/sources_1/new/core.sv b/RISCV_ML_ACC.srcs/sources_1/new/core.sv
+index 75a4cd5..8147938 100644
+--- a/RISCV_ML_ACC.srcs/sources_1/new/core.sv
++++ b/RISCV_ML_ACC.srcs/sources_1/new/core.sv
+@@ -109,7 +109,8 @@ module core
+         .clk(clk), //in
+         .en(1'b1), //in
+         .addr(pc), //in
+-        .instr(instr) //out
++        .instr(instr), //out
++        .b_en(1'b0), .b_we(4'b0), .b_addr(32'b0), .b_wdata(32'b0), .b_rdata()   // ADDED: port B unused
+     );
+ 
+     branch_comparator u_branch_comparator(
+@@ -126,7 +127,8 @@ module core
+         .addr(alu_result), //in
+         .wdata(rs2_val), //in
+         .funct3(instr[14:12]), //in
+-        .rdata(load_data) //out
++        .rdata(load_data), //out
++        .b_en(1'b0), .b_we(4'b0), .b_addr(32'b0), .b_wdata(32'b0), .b_rdata()   // ADDED: port B unused
+     );
+     
+     muldiv u_muldiv(                                  
+diff --git a/RISCV_ML_ACC.srcs/sources_1/new/core_pipe.sv b/RISCV_ML_ACC.srcs/sources_1/new/core_pipe.sv
+index 7020d4c..ed4c07d 100644
+--- a/RISCV_ML_ACC.srcs/sources_1/new/core_pipe.sv
++++ b/RISCV_ML_ACC.srcs/sources_1/new/core_pipe.sv
+@@ -34,7 +34,21 @@ module core_pipe
+         input  logic        rst,
+         input  logic [3:0]  btn,
+         output logic [31:0] pc_out,
+-        output logic [3:0]  led
++        output logic [3:0]  led,
++
++        // ADDED: port B of both memories, for the ARM side (AXI BRAM Controllers).
++        // Tie b_en to 0 when unused.
++        input  logic        imem_b_en,
++        input  logic [3:0]  imem_b_we,
++        input  logic [31:0] imem_b_addr,
++        input  logic [31:0] imem_b_wdata,
++        output logic [31:0] imem_b_rdata,
++
++        input  logic        dmem_b_en,
++        input  logic [3:0]  dmem_b_we,
++        input  logic [31:0] dmem_b_addr,
++        input  logic [31:0] dmem_b_wdata,
++        output logic [31:0] dmem_b_rdata
+     );
+ 
+     localparam logic [31:0] NOP = 32'h0000_0013;      // addi x0, x0, 0
+@@ -84,7 +98,9 @@ module core_pipe
+         .clk(clk), //in
+         .en(1'b1), //in
+         .addr(pc_next), //in                            // CHANGED: was pc
+-        .instr(instr) //out
++        .instr(instr), //out
++        .b_en(imem_b_en), .b_we(imem_b_we), .b_addr(imem_b_addr),      // ADDED: port B
++        .b_wdata(imem_b_wdata), .b_rdata(imem_b_rdata)
+     );
+ 
+     // ----------------------------- IF/ID register -----------------------------
+@@ -359,7 +375,9 @@ module core_pipe
+         .addr(alu_result_m), //in
+         .wdata(store_data_m), //in
+         .funct3(funct3_m), //in
+-        .rdata(load_data_w) //out                     // arrives in WB
++        .rdata(load_data_w), //out                    // arrives in WB
++        .b_en(dmem_b_en), .b_we(dmem_b_we), .b_addr(dmem_b_addr),      // ADDED: port B
++        .b_wdata(dmem_b_wdata), .b_rdata(dmem_b_rdata)
+     );
+ 
+     always_ff @(posedge clk) begin             // LED register
+diff --git a/RISCV_ML_ACC.srcs/sources_1/new/data_mem.sv b/RISCV_ML_ACC.srcs/sources_1/new/data_mem.sv
+index 434d944..e58fe44 100644
+--- a/RISCV_ML_ACC.srcs/sources_1/new/data_mem.sv
++++ b/RISCV_ML_ACC.srcs/sources_1/new/data_mem.sv
+@@ -31,7 +31,15 @@ module data_mem #(
+     input  logic [31:0] addr,     // byte address (from the ALU)
+     input  logic [31:0] wdata,    // data to store (value of rs2)
+     input  logic [2:0]  funct3,   // size and signed/unsigned
+-    output logic [31:0] rdata     // loaded value, extended to 32 bits
++    output logic [31:0] rdata,    // loaded value, extended to 32 bits
++
++    // ADDED: port B, for the ARM side (AXI BRAM Controller): load data and
++    // read results. Always synchronous: data arrives one clock after b_en.
++    input  logic        b_en,
++    input  logic [3:0]  b_we,     // byte write enables
++    input  logic [31:0] b_addr,   // byte address
++    input  logic [31:0] b_wdata,
++    output logic [31:0] b_rdata
+ );
+ 
+     localparam int AW = $clog2(DEPTH);
+@@ -43,6 +51,9 @@ module data_mem #(
+     assign index  = addr[AW+1:2];
+     assign offset = addr[1:0];
+ 
++    logic [AW-1:0] b_index;       // ADDED: word index for port B
++    assign b_index = b_addr[AW+1:2];
++
+     initial begin
+         for (int i = 0; i < DEPTH; i++)
+             mem[i] = 32'h0000_0000;
+@@ -78,14 +89,8 @@ module data_mem #(
+ 
+     // Write only the enabled bytes; the other bytes of the word keep their value.
+     // (This byte-enable style is what lets Vivado use block RAM byte-writes.)
+-    always_ff @(posedge clk) begin
+-        if (we) begin
+-            for (int i = 0; i < 4; i++) begin
+-                if (byte_en[i])
+-                    mem[index][8*i +: 8] <= wdata_lanes[8*i +: 8];
+-            end
+-        end
+-    end
++    // CHANGED: the write now sits inside the generate below, in the same
++    // always_ff as the synchronous read, so port A is one process.
+ 
+     // ------------------------------------------------------------------
+     // LOAD: read the whole word, then pick the byte/half and extend it.
+@@ -98,7 +103,16 @@ module data_mem #(
+         if (SYNC_READ) begin : g_sync_read
+             // Data arrives one clock later, so funct3 and offset are delayed
+             // by one clock too, to stay matched with their word.
++            // CHANGED: port A's write and read in one always_ff. With port B
++            // added, Vivado needs exactly one process per port to build a
++            // true dual-port block RAM.
+             always_ff @(posedge clk) begin
++                if (we) begin
++                    for (int i = 0; i < 4; i++) begin
++                        if (byte_en[i])
++                            mem[index][8*i +: 8] <= wdata_lanes[8*i +: 8];
++                    end
++                end
+                 if (en) begin
+                     word      <= mem[index];
+                     ld_funct3 <= funct3;
+@@ -106,12 +120,31 @@ module data_mem #(
+                 end
+             end
+         end else begin : g_async_read
++            always_ff @(posedge clk) begin          // write, as before
++                if (we) begin
++                    for (int i = 0; i < 4; i++) begin
++                        if (byte_en[i])
++                            mem[index][8*i +: 8] <= wdata_lanes[8*i +: 8];
++                    end
++                end
++            end
+             assign word      = mem[index];
+             assign ld_funct3 = funct3;
+             assign ld_offset = offset;
+         end
+     endgenerate
+ 
++    // ADDED: port B, in its own block (one process per port, UG901 template)
++    always_ff @(posedge clk) begin
++        if (b_en) begin
++            for (int i = 0; i < 4; i++) begin
++                if (b_we[i])
++                    mem[b_index][8*i +: 8] <= b_wdata[8*i +: 8];
++            end
++            b_rdata <= mem[b_index];
++        end
++    end
++
+     logic [7:0]  ld_byte;
+     logic [15:0] ld_half;
+     assign ld_byte = word[8*ld_offset +: 8];          // byte 0..3
+diff --git a/RISCV_ML_ACC.srcs/sources_1/new/instr_mem.sv b/RISCV_ML_ACC.srcs/sources_1/new/instr_mem.sv
+index f4a099f..ce66555 100644
+--- a/RISCV_ML_ACC.srcs/sources_1/new/instr_mem.sv
++++ b/RISCV_ML_ACC.srcs/sources_1/new/instr_mem.sv
+@@ -29,7 +29,15 @@ module instr_mem #(
+     input  logic        en,      // read enable, used only when SYNC_READ = 1
+                                  // (the pipeline will set it to 0 to stall)
+     input  logic [31:0] addr,    // byte address: the PC
+-    output logic [31:0] instr
++    output logic [31:0] instr,
++
++    // ADDED: port B, for the ARM side (AXI BRAM Controller): load programs and
++    // read them back. Always synchronous: data arrives one clock after b_en.
++    input  logic        b_en,
++    input  logic [3:0]  b_we,    // byte write enables
++    input  logic [31:0] b_addr,  // byte address
++    input  logic [31:0] b_wdata,
++    output logic [31:0] b_rdata
+ );
+ 
+     localparam int AW = $clog2(DEPTH);       // index bits: 1024 words -> 10
+@@ -41,6 +49,9 @@ module instr_mem #(
+     logic [AW-1:0] index;
+     assign index = addr[AW+1:2];
+ 
++    logic [AW-1:0] b_index;                  // ADDED: word index for port B
++    assign b_index = b_addr[AW+1:2];
++
+     // Fill every word with a NOP (addi x0, x0, 0) first, so any address past
+     // the end of the program reads as "do nothing" instead of X. Then load
+     // the program over the start of the memory.
+@@ -63,4 +74,16 @@ module instr_mem #(
+         end
+     endgenerate
+ 
++    // ADDED: port B, in its own block. One process per port is the pattern
++    // Vivado needs to build a true dual-port block RAM (UG901 template).
++    always_ff @(posedge clk) begin
++        if (b_en) begin
++            for (int i = 0; i < 4; i++) begin
++                if (b_we[i])
++                    mem[b_index][8*i +: 8] <= b_wdata[8*i +: 8];
++            end
++            b_rdata <= mem[b_index];
++        end
++    end
++
+ endmodule
+\ No newline at end of file
+diff --git a/RISCV_ML_ACC.srcs/sources_1/new/top.sv b/RISCV_ML_ACC.srcs/sources_1/new/top.sv
+index b579943..7428bd7 100644
+--- a/RISCV_ML_ACC.srcs/sources_1/new/top.sv
++++ b/RISCV_ML_ACC.srcs/sources_1/new/top.sv
+@@ -67,7 +67,10 @@ module top (
+         .rst    (rst),
+         .btn    (btn_sync),
+         .pc_out (),
+-        .led    (led)
++        .led    (led),
++        // ADDED: memory port B unused here (the ARM side drives it on the board)
++        .imem_b_en(1'b0), .imem_b_we(4'b0), .imem_b_addr(32'b0), .imem_b_wdata(32'b0), .imem_b_rdata(),
++        .dmem_b_en(1'b0), .dmem_b_we(4'b0), .dmem_b_addr(32'b0), .dmem_b_wdata(32'b0), .dmem_b_rdata()
+     );
+ 
+ endmodule
+\ No newline at end of file

@@ -109,16 +109,17 @@ module core
         .clk(clk), //in
         .en(1'b1), //in
         .addr(pc), //in
-        .instr(instr) //out
+        .instr(instr), //out
+        .b_en(1'b0), .b_we(4'b0), .b_addr(32'b0), .b_wdata(32'b0), .b_rdata()   // ADDED: port B unused
     );
-
+ 
     branch_comparator u_branch_comparator(
         .a(rs1_val), //in
         .b(rs2_val), //in
         .func(instr[14:12]), //in
         .bout(taken) //out
     );
-
+ 
     data_mem #(.DEPTH(1024), .SYNC_READ(0)) u_data_mem(
         .clk(clk), //in
         .en(1'b1), //in
@@ -126,7 +127,8 @@ module core
         .addr(alu_result), //in
         .wdata(rs2_val), //in
         .funct3(instr[14:12]), //in
-        .rdata(load_data) //out
+        .rdata(load_data), //out
+        .b_en(1'b0), .b_we(4'b0), .b_addr(32'b0), .b_wdata(32'b0), .b_rdata()   // ADDED: port B unused
     );
     
     muldiv u_muldiv(                                  
@@ -135,7 +137,7 @@ module core
         .funct3(instr[14:12]), //in
         .out(md_result) //out
     );
-
+ 
     // mux A: ALU first input
     always_comb begin
         case (alu_a_sel)
@@ -145,7 +147,7 @@ module core
             default: alu_a = rs1_val;
         endcase
     end
-
+ 
     // mux B: ALU second input
     always_comb begin
         case (alu_b_sel)
@@ -154,7 +156,7 @@ module core
             default: alu_b = rs2_val;
         endcase
     end
-
+ 
     // result mux: the value written into rd
     always_comb begin
         case (result_src)
@@ -165,7 +167,7 @@ module core
             default: wb_value = alu_result;
         endcase
     end
-
+ 
     assign pc_plus4    = pc + 32'd4;          // PC + 4 adder
     assign pc_target   = pc + imm;            // PC + imm adder (branch / jal target)
     assign take_branch = branch & taken;      // a branch AND its condition is true

@@ -31,7 +31,13 @@ module data_mem #(
     input  logic [31:0] addr,     // byte address (from the ALU)
     input  logic [31:0] wdata,    // data to store (value of rs2)
     input  logic [2:0]  funct3,   // size and signed/unsigned
-    output logic [31:0] rdata     // loaded value, extended to 32 bits
+    output logic [31:0] rdata,     // loaded value, extended to 32 bits
+    input  logic        b_en,
+    input  logic [3:0]  b_we,     // byte write enables
+    input  logic [31:0] b_addr,   // byte address
+    input  logic [31:0] b_wdata,
+    output logic [31:0] b_rdata
+
 );
 
     localparam int AW = $clog2(DEPTH);
@@ -42,6 +48,10 @@ module data_mem #(
     logic [1:0]    offset;        // which byte inside the word
     assign index  = addr[AW+1:2];
     assign offset = addr[1:0];
+
+
+    logic [AW-1:0] b_index;       
+    assign b_index = b_addr[AW+1:2];
 
     initial begin
         for (int i = 0; i < DEPTH; i++)
@@ -90,15 +100,24 @@ module data_mem #(
     // ------------------------------------------------------------------
     // LOAD: read the whole word, then pick the byte/half and extend it.
     // ------------------------------------------------------------------
-    logic [31:0] word;            // the raw 32-bit word read from memory
+        logic [31:0] word;            // the raw 32-bit word read from memory
     logic [2:0]  ld_funct3;       // funct3 and offset that belong to that word
     logic [1:0]  ld_offset;
-
+ 
     generate
         if (SYNC_READ) begin : g_sync_read
             // Data arrives one clock later, so funct3 and offset are delayed
             // by one clock too, to stay matched with their word.
+            // CHANGED: port A's write and read in one always_ff. With port B
+            // added, Vivado needs exactly one process per port to build a
+            // true dual-port block RAM.
             always_ff @(posedge clk) begin
+                if (we) begin
+                    for (int i = 0; i < 4; i++) begin
+                        if (byte_en[i])
+                            mem[index][8*i +: 8] <= wdata_lanes[8*i +: 8];
+                    end
+                end
                 if (en) begin
                     word      <= mem[index];
                     ld_funct3 <= funct3;
@@ -106,17 +125,36 @@ module data_mem #(
                 end
             end
         end else begin : g_async_read
+            always_ff @(posedge clk) begin          // write, as before
+                if (we) begin
+                    for (int i = 0; i < 4; i++) begin
+                        if (byte_en[i])
+                            mem[index][8*i +: 8] <= wdata_lanes[8*i +: 8];
+                    end
+                end
+            end
             assign word      = mem[index];
             assign ld_funct3 = funct3;
             assign ld_offset = offset;
         end
     endgenerate
-
+ 
+    // ADDED: port B, in its own block (one process per port, UG901 template)
+    always_ff @(posedge clk) begin
+        if (b_en) begin
+            for (int i = 0; i < 4; i++) begin
+                if (b_we[i])
+                    mem[b_index][8*i +: 8] <= b_wdata[8*i +: 8];
+            end
+            b_rdata <= mem[b_index];
+        end
+    end
+ 
     logic [7:0]  ld_byte;
     logic [15:0] ld_half;
     assign ld_byte = word[8*ld_offset +: 8];          // byte 0..3
     assign ld_half = word[16*ld_offset[1] +: 16];     // low or high half
-
+ 
     always_comb begin
         case (ld_funct3)
             3'b000:  rdata = {{24{ld_byte[7]}},  ld_byte};   // lb:  sign-extend

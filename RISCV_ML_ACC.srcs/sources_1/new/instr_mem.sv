@@ -29,7 +29,13 @@ module instr_mem #(
     input  logic        en,      // read enable, used only when SYNC_READ = 1
                                  // (the pipeline will set it to 0 to stall)
     input  logic [31:0] addr,    // byte address: the PC
-    output logic [31:0] instr
+    output logic [31:0] instr,
+    input  logic        b_en,
+    input  logic [3:0]  b_we,    // byte write enables
+    input  logic [31:0] b_addr,  // byte address
+    input  logic [31:0] b_wdata,
+    output logic [31:0] b_rdata
+
 );
 
     localparam int AW = $clog2(DEPTH);       // index bits: 1024 words -> 10
@@ -40,6 +46,9 @@ module instr_mem #(
     // so the word index is addr / 4: drop the two lowest bits.
     logic [AW-1:0] index;
     assign index = addr[AW+1:2];
+
+    logic [AW-1:0] b_index;                 
+    assign b_index = b_addr[AW+1:2];
 
     // Fill every word with a NOP (addi x0, x0, 0) first, so any address past
     // the end of the program reads as "do nothing" instead of X. Then load
@@ -62,5 +71,15 @@ module instr_mem #(
             assign instr = mem[index];
         end
     endgenerate
+        always_ff @(posedge clk) begin
+        if (b_en) begin
+            for (int i = 0; i < 4; i++) begin
+                if (b_we[i])
+                    mem[b_index][8*i +: 8] <= b_wdata[8*i +: 8];
+            end
+            b_rdata <= mem[b_index];
+        end
+    end
+
 
 endmodule

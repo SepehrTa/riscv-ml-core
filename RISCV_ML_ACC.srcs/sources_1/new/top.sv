@@ -67,7 +67,8 @@ module top (
         .rst    (rst),
         .btn    (btn_sync),
         .pc_out (),
-        .led    (led)
-    );
-
+        .led    (led),
+        .imem_b_en(1'b0), .imem_b_we(4'b0), .imem_b_addr(32'b0), .imem_b_wdata(32'b0), .imem_b_rdata(),
+        .dmem_b_en(1'b0), .dmem_b_we(4'b0), .dmem_b_addr(32'b0), .dmem_b_wdata(32'b0), .dmem_b_rdata()
+        );
 endmodule
