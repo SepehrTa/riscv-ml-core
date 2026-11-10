@@ -28,3 +28,4 @@ vivado_pid*.zip
 dfx_runtime.txt
 RISCV_ML_ACC.srcs/utils_1/
 *.map
+pynq/

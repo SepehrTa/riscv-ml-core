@@ -1,6 +1,6 @@
 ## 125 MHz system clock
-set_property -dict {PACKAGE_PIN H16 IOSTANDARD LVCMOS33} [get_ports sysclk]
-create_clock -name sysclk -period 8.000 [get_ports sysclk]
+#set_property -dict {PACKAGE_PIN H16 IOSTANDARD LVCMOS33} [get_ports sysclk]
+#create_clock -name sysclk -period 8.000 [get_ports sysclk]
 
 ## Buttons BTN0-BTN3
 set_property -dict {PACKAGE_PIN D19 IOSTANDARD LVCMOS33} [get_ports {btn[0]}]
