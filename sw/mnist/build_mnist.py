@@ -48,7 +48,10 @@ def bin_to_mem(source, destination, capacity):
 
 def main():
     board = "--board" in sys.argv
-    tag = "mnist_board" if board else "mnist"
+    server = "--server" in sys.argv                      # ADDED (M4)
+    if board and server:
+        sys.exit("Choose either --board or --server, not both.")
+    tag = "mnist_board" if board else "mnist_server" if server else "mnist"
 
     if not (HERE / "mnist_model.h").is_file():
         sys.exit("Missing sw/mnist/mnist_model.h. Run train_mnist.py first and commit the header.")
@@ -66,6 +69,8 @@ def main():
     ]
     if board:
         flags.append("-DBOARD")
+    if server:
+        flags.append("-DSERVER")
     gcc, objcopy = PREFIX + "gcc", PREFIX + "objcopy"
     crt_obj, c_obj = BUILD / "crt0.o", BUILD / "mnist.o"
     elf = BUILD / f"{tag}.elf"

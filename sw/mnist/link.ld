@@ -49,6 +49,13 @@ SECTIONS
         __bss_end = .;
     } > DMEM
 
+    /* ADDED (M4): mailbox shared with the ARM, at a fixed address.  NOLOAD:
+     * it is not part of the DMEM image, so loading never overwrites it. */
+    .mailbox 0x0001E000 (NOLOAD) : ALIGN(4)
+    {
+        KEEP(*(.mailbox))
+    } > DMEM
+
     __stack_top   = ORIGIN(DMEM) + LENGTH(DMEM);
     __stack_limit = __stack_top - STACK_BYTES;
 
@@ -63,3 +70,5 @@ SECTIONS
 
 ASSERT(SIZEOF(.text) <= LENGTH(IMEM), "MNIST program exceeds 4 KiB IMEM: increase IMEM_DEPTH")
 ASSERT(__bss_end <= __stack_limit, "MNIST data/BSS overlaps reserved 4 KiB stack")
+ASSERT(__bss_end <= ADDR(.mailbox), "MNIST data/BSS overlaps the mailbox at 0x0001E000")
+ASSERT(ADDR(.mailbox) + SIZEOF(.mailbox) <= __stack_limit, "mailbox overlaps the stack")

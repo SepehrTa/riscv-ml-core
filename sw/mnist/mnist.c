@@ -18,6 +18,7 @@
  * LEDs show 0x1 for pass and 0xf for failure.  TEST_Y is informational;
  * hardware should match reference logits even when the model misclassifies.
  */
+#include <stddef.h>
 #include <stdint.h>
 #include "mnist_model.h"
 
@@ -219,6 +220,66 @@ static inline void wait_cycles(uint32_t n)
     uint32_t start = read_cycles();
     while (read_cycles() - start < n);
 }
+#ifdef SERVER
+/* ADDED (M4): server mode.  After the self-check, the core classifies images
+ * that the ARM sends through a mailbox at a fixed address (link.ld puts the
+ * .mailbox section at 0x0001E000, between the data and the stack).
+ *
+ *   ARM : writes image[] (and flags), then cmd = n, a new sequence number
+ *   core: classifies, writes the results, then ack = n
+ *
+ * ack == cmd means "ready".  Sequence numbers instead of a 0/1 flag make a
+ * stale value harmless: the ARM waits until ack equals exactly the n it sent.
+ */
+typedef struct {
+	volatile uint32_t cmd;                  /* 0x000 ARM : sequence number          */
+	volatile uint32_t ack;                  /* 0x004 core: = cmd when done          */
+	volatile uint32_t pred;                 /* 0x008 core: predicted digit          */
+	volatile uint32_t cycles;               /* 0x00C core: dot4.acc inference cycles */
+	volatile int32_t  logits[N_OUT];        /* 0x010 core: the 10 logits            */
+	volatile uint32_t flags;                /* 0x038 ARM : bit 0 = also run RV32IM  */
+	volatile uint32_t cycles_plain;         /* 0x03C core: plain RV32IM cycles      */
+	int8_t            image[N_IN];          /* 0x040 ARM : int8 pixels (pixel >> 1) */
+} mailbox_t;
+
+_Static_assert(offsetof(mailbox_t, flags) == 0x38, "mailbox layout changed");
+_Static_assert(offsetof(mailbox_t, image) == 0x40, "mailbox layout changed");
+
+mailbox_t mailbox __attribute__((section(".mailbox"), aligned(4)));
+
+static void serve(void)
+{
+	uint32_t last = mailbox.cmd;
+	mailbox.ack = last;                     /* ready */
+	for (;;) {
+		uint32_t n;
+		while ((n = mailbox.cmd) == last)
+			;
+		__asm__ volatile ("" ::: "memory");  /* read the image only after cmd */
+		last = n;
+
+		int32_t logits[N_OUT];
+		uint32_t t0, t1;
+		if (mailbox.flags & 1u) {
+			t0 = read_cycles();
+			infer_scalar(mailbox.image, logits);
+			t1 = read_cycles();
+			mailbox.cycles_plain = t1 - t0;
+		}
+		t0 = read_cycles();
+		infer_dot4(mailbox.image, logits);
+		t1 = read_cycles();
+
+		for (uint32_t o = 0; o < N_OUT; ++o)
+			mailbox.logits[o] = logits[o];
+		mailbox.pred = argmax(logits);
+		mailbox.cycles = t1 - t0;
+		write_led(mailbox.pred);
+		mailbox.ack = n;                    /* last: the results are complete */
+	}
+}
+#endif
+
 int main(void)
 {
     mismatch_count = 0;
@@ -271,6 +332,14 @@ int main(void)
 				;
 			wait_cycles(1300000u);
 		}
+	#endif
+	#ifdef SERVER
+		/* ADDED (M4): serve images from the ARM; on a failed self-check the
+		 * LEDs stay at 1111 and the core never answers. */
+		if (mismatch_count)
+			for (;;)
+				;
+		serve();
 	#endif
     return (int)(mismatch_count ? first_error : 1u);
 }
