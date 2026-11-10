@@ -30,24 +30,26 @@ module instr_mem #(
                                  // (the pipeline will set it to 0 to stall)
     input  logic [31:0] addr,    // byte address: the PC
     output logic [31:0] instr,
+
+    // ADDED: port B, for the ARM side (AXI BRAM Controller): load programs and
+    // read them back. Always synchronous: data arrives one clock after b_en.
     input  logic        b_en,
     input  logic [3:0]  b_we,    // byte write enables
     input  logic [31:0] b_addr,  // byte address
     input  logic [31:0] b_wdata,
     output logic [31:0] b_rdata
-
 );
 
     localparam int AW = $clog2(DEPTH);       // index bits: 1024 words -> 10
 
-    logic [31:0] mem [DEPTH];
+    (* ram_style = "block" *) logic [31:0] mem [DEPTH];   // CHANGED: ask for block RAM
 
     // The PC counts bytes (0, 4, 8, ...) but each entry is a 4-byte word,
     // so the word index is addr / 4: drop the two lowest bits.
     logic [AW-1:0] index;
     assign index = addr[AW+1:2];
 
-    logic [AW-1:0] b_index;                 
+    logic [AW-1:0] b_index;                  // ADDED: word index for port B
     assign b_index = b_addr[AW+1:2];
 
     // Fill every word with a NOP (addi x0, x0, 0) first, so any address past
@@ -71,7 +73,10 @@ module instr_mem #(
             assign instr = mem[index];
         end
     endgenerate
-        always_ff @(posedge clk) begin
+
+    // ADDED: port B, in its own block. One process per port is the pattern
+    // Vivado needs to build a true dual-port block RAM (UG901 template).
+    always @(posedge clk) begin                     // CHANGED: always, as in data_mem
         if (b_en) begin
             for (int i = 0; i < 4; i++) begin
                 if (b_we[i])
@@ -80,6 +85,5 @@ module instr_mem #(
             b_rdata <= mem[b_index];
         end
     end
-
 
 endmodule

@@ -31,26 +31,29 @@ module data_mem #(
     input  logic [31:0] addr,     // byte address (from the ALU)
     input  logic [31:0] wdata,    // data to store (value of rs2)
     input  logic [2:0]  funct3,   // size and signed/unsigned
-    output logic [31:0] rdata,     // loaded value, extended to 32 bits
+    output logic [31:0] rdata,    // loaded value, extended to 32 bits
+
+    // ADDED: port B, for the ARM side (AXI BRAM Controller): load data and
+    // read results. Always synchronous: data arrives one clock after b_en.
     input  logic        b_en,
     input  logic [3:0]  b_we,     // byte write enables
     input  logic [31:0] b_addr,   // byte address
     input  logic [31:0] b_wdata,
     output logic [31:0] b_rdata
-
 );
 
     localparam int AW = $clog2(DEPTH);
 
-    logic [31:0] mem [DEPTH];
+    // CHANGED: ram_style asks Vivado for block RAM, so it reports a clear
+    // message instead of silently building the memory from flip-flops.
+    (* ram_style = "block" *) logic [31:0] mem [DEPTH];
 
     logic [AW-1:0] index;         // which word
     logic [1:0]    offset;        // which byte inside the word
     assign index  = addr[AW+1:2];
     assign offset = addr[1:0];
 
-
-    logic [AW-1:0] b_index;       
+    logic [AW-1:0] b_index;       // ADDED: word index for port B
     assign b_index = b_addr[AW+1:2];
 
     initial begin
@@ -88,30 +91,27 @@ module data_mem #(
 
     // Write only the enabled bytes; the other bytes of the word keep their value.
     // (This byte-enable style is what lets Vivado use block RAM byte-writes.)
-    always_ff @(posedge clk) begin
-        if (we) begin
-            for (int i = 0; i < 4; i++) begin
-                if (byte_en[i])
-                    mem[index][8*i +: 8] <= wdata_lanes[8*i +: 8];
-            end
-        end
-    end
+    // CHANGED: the write now sits inside the generate below, in the same
+    // process as the synchronous read, so port A is one process.
 
     // ------------------------------------------------------------------
     // LOAD: read the whole word, then pick the byte/half and extend it.
     // ------------------------------------------------------------------
-        logic [31:0] word;            // the raw 32-bit word read from memory
+    logic [31:0] word;            // the raw 32-bit word read from memory
     logic [2:0]  ld_funct3;       // funct3 and offset that belong to that word
     logic [1:0]  ld_offset;
- 
+
     generate
         if (SYNC_READ) begin : g_sync_read
             // Data arrives one clock later, so funct3 and offset are delayed
             // by one clock too, to stay matched with their word.
-            // CHANGED: port A's write and read in one always_ff. With port B
+            // CHANGED: port A's write and read in one process. With port B
             // added, Vivado needs exactly one process per port to build a
             // true dual-port block RAM.
-            always_ff @(posedge clk) begin
+            // CHANGED: plain always (not always_ff) for every process that
+            // writes mem: mem now has two writers (port A and port B), and
+            // always_ff allows only one. This matches Xilinx's own template.
+            always @(posedge clk) begin
                 if (we) begin
                     for (int i = 0; i < 4; i++) begin
                         if (byte_en[i])
@@ -125,7 +125,7 @@ module data_mem #(
                 end
             end
         end else begin : g_async_read
-            always_ff @(posedge clk) begin          // write, as before
+            always @(posedge clk) begin             // write, as before (CHANGED: always)
                 if (we) begin
                     for (int i = 0; i < 4; i++) begin
                         if (byte_en[i])
@@ -138,9 +138,9 @@ module data_mem #(
             assign ld_offset = offset;
         end
     endgenerate
- 
+
     // ADDED: port B, in its own block (one process per port, UG901 template)
-    always_ff @(posedge clk) begin
+    always @(posedge clk) begin                     // CHANGED: always, see above
         if (b_en) begin
             for (int i = 0; i < 4; i++) begin
                 if (b_we[i])
@@ -149,12 +149,12 @@ module data_mem #(
             b_rdata <= mem[b_index];
         end
     end
- 
+
     logic [7:0]  ld_byte;
     logic [15:0] ld_half;
     assign ld_byte = word[8*ld_offset +: 8];          // byte 0..3
     assign ld_half = word[16*ld_offset[1] +: 16];     // low or high half
- 
+
     always_comb begin
         case (ld_funct3)
             3'b000:  rdata = {{24{ld_byte[7]}},  ld_byte};   // lb:  sign-extend
