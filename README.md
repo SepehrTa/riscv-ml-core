@@ -1,13 +1,13 @@
 # RISC-V ML Core
 
-I built a RISC-V processor from scratch in SystemVerilog and run it on a PYNQ-Z2 FPGA board. On top of the standard RV32IM instruction set, it has custom instructions for int8 neural-network math. They make an int8 dot product **4.8x faster** than the same code in plain RV32IM, and a complete quantized MNIST classifier **4.37x faster**.
+I built a RISC-V processor from scratch in SystemVerilog and run it on a PYNQ-Z2 FPGA board. On top of the standard RV32IM instruction set, it has custom instructions for int8 neural-network math. They make an int8 dot product **4.8x faster** than the same code in plain RV32IM, and a complete quantized MNIST classifier **4.37x faster**. Next to the core, a small matrix-vector engine that I designed as a memory-mapped accelerator takes the same classifier to **3,240 cycles per image: 41.5x faster than the best plain RV32IM code**, or about 15,000 images per second.
 
 The Zynq chip on the board also has an ARM processor, and it now drives the core from Python: it loads programs into the core's memories, starts it, and reads the results back, with no bitstream rebuild. That's how the core classified the **whole MNIST test set, all 10,000 images, at 96.60%**, bit-exact with the Python model on every single image.
 
 The repo has two working RV32IM cores:
 
 - **`core`** is a simple single-cycle design. It was the first thing I got working, and I keep it as a reference model for testing the faster one.
-- **`core_pipe`** is a 5-stage pipeline (fetch, decode, execute, memory, write-back) with forwarding, stalls, block-RAM memories, an iterative divider, a multiplier in its own stage, and the custom ML unit.
+- **`core_pipe`** is a 5-stage pipeline (fetch, decode, execute, memory, write-back) with forwarding, stalls, block-RAM memories, an iterative divider, a multiplier in its own stage, the custom ML unit, and the matrix-vector engine in its I/O space.
 
 Both pass all 48 official [riscv-tests](https://github.com/riscv/riscv-tests) for RV32I and RV32M, and both have run programs on the board.
 
@@ -15,13 +15,14 @@ Both pass all 48 official [riscv-tests](https://github.com/riscv/riscv-tests) fo
 
 | | Single-cycle `core` | Pipelined `core_pipe` with ML unit |
 |---|---|---|
-| Clock on the board | 10 MHz | 65 MHz standalone (1.05 ns to spare); 50 MHz from the ARM side's clock in the current build (4.5 ns to spare) |
+| Clock on the board | 10 MHz | 65 MHz standalone (1.05 ns to spare); 50 MHz from the ARM side's clock in the ARM-connected builds |
 | Official riscv-tests | 48 / 48 | 48 / 48, plus the custom ML test |
 | int8 dot product, 256 elements | | 4.8x faster with the custom instructions |
 | Quantized MNIST inference (784 → 32 → 10) | | 4.37x faster with `dot4.acc`, measured on the board |
 | Full MNIST test set, run on the FPGA | | 96.60% on 10,000 images, 0 differences from the reference |
+| MNIST with the matrix-vector engine | | 3,240 cycles per image: 41.5x over plain RV32IM, 9.2x over `dot4.acc` |
 
-The whole pipelined core with the ML unit uses only a small corner of the Zynq-7020: 1,884 LUTs (3.5%), 756 flip-flops (0.7%), 4 DSP blocks (1.8%). These figures, and the 1.05 ns timing margin, are from the earlier small-memory build. The current build adds the 64 KB data memory and the ARM connection: its two memories take 17 block RAMs (16 for data, 1 for instructions), and it meets timing at 50 MHz with 4.5 ns to spare.
+The whole pipelined core with the ML unit uses only a small corner of the Zynq-7020: 1,884 LUTs (3.5%), 756 flip-flops (0.7%), 4 DSP blocks (1.8%). These figures, and the 1.05 ns timing margin, are from the earlier small-memory build. The ARM-connected build adds the 64 KB data memory: its two memories take 17 block RAMs (16 for data, 1 for instructions), and before the matrix-vector engine was added it met timing at 50 MHz with 4.5 ns to spare.
 
 ## How the pipeline works
 
@@ -49,7 +50,7 @@ A few decisions worth explaining:
 
 The slowest path now is a value loaded from memory that feeds a jump target, going through the ALU into the instruction memory's address. Shortening it further would mean giving up cycles on every taken branch, so I stopped there.
 
-There are no exceptions or interrupts yet; `ecall`, `ebreak` and `fence` do nothing.
+There are no exceptions or interrupts; `ecall`, `ebreak` and `fence` do nothing.
 
 ## The ML extension
 
@@ -117,7 +118,7 @@ The cycle counts above come from RTL simulation. Later, with the ARM reading the
 
 In the `dot4.acc` version, the inner loop is two loads, one `dot4.acc`, two address increments and a branch. Counting one load-use stall and the two instructions flushed after the taken branch, that's **9 cycles for every four multiply-adds**, and only one of those cycles is the multiply-add itself. The first layer's loop is about 97% of the inference time; requantization is only about 1%.
 
-So the next speedups will come from the loop around `dot4.acc`, not from the math: unrolling the loop (about 2x more, by my estimate), several accumulators so one loaded input word feeds several neurons, or loads that increment their own address.
+So the remaining cost was the loop around `dot4.acc`, not the math. That's what I attacked next, first in software and then in hardware (see "Two ways to accelerate the same network").
 
 The MNIST firmware uses **4 KB instruction memory** and **64 KB data memory** to hold the model, test images, intermediate values and performance counters. The ELF/linker sets the memory locations, while `build_mnist.py` creates the initialization files: `mnist_imem.mem` and `mnist_dmem.mem` for simulation, and `mnist_board_imem.mem` and `mnist_board_dmem.mem` for the board.
 
@@ -160,6 +161,62 @@ For the full test set, the firmware has a server mode (`build_mnist.py --server`
 
 A few images take 7 cycles fewer than the rest: the ReLU has a branch, so the number of negative activations changes the cycle count very slightly. The whole run takes 77 seconds, but the core only computes for about 12 of them. The rest is Python writing the pixels one word at a time.
 
+## Two ways to accelerate the same network
+
+### First, in software: unrolling the loop
+
+Unrolling the inner loop by four (eight loads, then four `dot4.acc` back to back) pays the loop overhead once per 16 multiply-adds instead of once per 4, and it also hides the load-use stall. I unrolled the plain RV32IM loop the same way, so the comparison stays fair. Built with `build_mnist.py --unroll`, on the full test set:
+
+| Version | Cycles per image | Gain from unrolling |
+|---|---|---|
+| Plain RV32IM, unrolled | 134,484 | 1.90x |
+| `dot4.acc`, unrolled | 29,776 | 1.96x |
+
+The custom instructions are still 4.5x faster when both sides get the same software optimization.
+
+### Then, in hardware: a matrix-vector engine
+
+The custom instruction speeds up one step of a dot product, but the core still has to fetch every instruction, load every operand, and run the loop. So I built a second kind of accelerator: a small engine that computes a whole matrix-vector product, a full layer, by itself.
+
+```
+        input buffer x ──── one word (4 int8 values) per cycle, shared by all lanes
+                    │
+   ┌────────┬───────┴┬────────┐
+ bank 0   bank 1   ...      bank 7      ← weights: row r lives in bank r % 8
+   │        │                 │
+ lane 0   lane 1   ...      lane 7      ← each lane: 4 int8 multiply-adds per cycle
+   │        │                 │
+ acc 0    acc 1    ...      acc 7  ──► results
+```
+
+Every cycle, each of the 8 lanes reads 4 weights of its own row from its own bank, multiplies them by the same 4 inputs, and adds the result to its accumulator: **32 multiply-adds per cycle**. Rows are processed in groups of 8; the 32 hidden neurons of layer 1 take 4 groups of 196 words, about 790 cycles. The dataflow is output-stationary: each lane keeps its sum while the weights stream past. That fits matrix × vector at batch 1, where every weight is used once per image (a weight-stationary systolic array, like Google's TPU, needs a batch of inputs to reuse its weights).
+
+**Memory bandwidth is the real design problem.** The engine needs 9 words every cycle (8 weights and 1 input), and the core's data memory can deliver at most 2. So the engine has its own memories: 8 weight banks and an input buffer, each a separate block RAM with its own read port. That gives 288 bits per cycle internally. The weights are loaded once at startup and then reused for every image, so their loading cost is spread over the whole test set.
+
+The engine is memory-mapped in the core's I/O space. The core loads the weights once, then for each image writes the input, starts layer 1, waits, does the bias, requantization and ReLU itself, writes the 32 hidden values back as the next input, and runs layer 2. The engine is a 4-stage pipeline (address, block RAM, products, accumulate), written in `mv_engine.sv` and tested on its own by `tb_mv_engine.sv`.
+
+On the board, built with `build_mnist.py --server --unroll --mve`, over the full test set:
+
+| Measurement | Result |
+|---|---|
+| Accuracy | **96.60%**, 0 of 10,000 images differ from the reference |
+| Cycles per image | **3,240** (65 µs at 50 MHz), the same for every image |
+| Throughput of the core | 15,432 images per second |
+
+### All versions side by side
+
+| Version, measured on the FPGA | Cycles per image | vs. plain RV32IM |
+|---|---|---|
+| Plain RV32IM | 255,400 | 1x |
+| Plain RV32IM, unrolled | 134,484 | 1.9x |
+| `dot4.acc` | 58,416 | 4.4x |
+| `dot4.acc`, unrolled | 29,776 | 8.6x |
+| **Matrix-vector engine** | **3,240** | **79x** |
+
+Against the best plain code, the engine is **41.5x** faster, and **9.2x** faster than the best custom-instruction version.
+
+Of the 3,240 cycles, the engine itself computes for only about 800. The rest is the core copying the 196 input words in (about 1,400 cycles) and requantizing between the layers (about 800). That's Amdahl's law: once the multiply-adds are fast, data movement and the work around them dominate.
+
 ## Memory map
 
 | Address | What's there |
@@ -170,8 +227,12 @@ A few images take 7 cycles fewer than the rest: the ReLU has a branch, so the nu
 | `0x8000_0000` | LEDs, write bits 3:0 |
 | `0x8000_0004` | buttons, read bits 3:0 |
 | `0x8000_0008` | cycle counter, read |
+| `0x8000_1000` | matrix-vector engine registers (start, status, layer settings, cycle count) |
+| `0x8001_0000` | engine weights, 8 banks, write |
+| `0x8002_0000` | engine input buffer, write |
+| `0x8003_0000` | engine results, read |
 
-Anything with bit 31 set is I/O.
+Anything with bit 31 set is I/O: `0x8000_0xxx` is the core's own I/O, and the rest belongs to the engine.
 
 ## Testing
 
@@ -184,6 +245,8 @@ The divider and the ML unit each have their own self-checking testbench: 4,400 d
 The custom instructions also have a self-checking program, `ml_test.s`, that runs in the same testbench as the riscv-tests. It covers back-to-back accumulation, results used immediately, operands that were just loaded, a divide between two accumulations, and an accumulation fetched after a taken branch, which must be thrown away without touching the accumulator.
 
 For MNIST, `tb_mnist` checks all 10 logits of both implementations, for all 16 test images, against the Python reference, bit for bit. `tb_loader` does in simulation what the ARM does on the board: it loads the program and data only through port B, runs MNIST, and reads the results back through port B.
+
+The matrix-vector engine has its own self-checking testbench, `tb_mv_engine`: 26 tests against a reference model, covering the layer-1 and layer-2 shapes, one-word rows, all inputs and weights at -128, a start while busy, back-to-back runs, and 20 random shapes. In the firmware, the engine runs as a third path in the MNIST self-check, so every build compares all three implementations against the reference.
 
 For the trickier pipeline cases, I write stress programs (a multiply feeding another multiply, a load feeding a divide, a branch right after a multiply, and so on) and run them on both cores. The single-cycle core is simple enough to trust, so if the final register values differ, the pipeline has a bug.
 
@@ -232,6 +295,8 @@ python build_mnist.py --board    # board:      build/mnist_board_imem.mem, build
 python build_mnist.py --server   # server:     build/mnist_server_imem.mem, build/mnist_server_dmem.mem
 ```
 
+Two options combine with any of these: `--unroll` (unrolled inner loops) and `--mve` (the matrix-vector engine). They add `_u4` and `_mve` to the file names, for example `mnist_server_u4_mve_imem.mem`. The Python scripts on the board take the file prefix as an argument: `python3 run_mnist.py mnist_u4_mve` or `python3 run_mnist_full.py mnist_server_u4_mve`.
+
 `core_pipe` takes `IMEM_DEPTH=1024` and `DMEM_DEPTH=16384`. Set `tb_mnist` as the simulation top to check both inference paths and print the cycle comparison; the simulation build ends with LD0 on (`0001`) for PASS. Loaded on the board, the board build shows the predicted digit on the LEDs, and BTN1 steps through the 16 images.
 
 For the full test set, put these next to `riscv_ml.bit` and `riscv_ml.hwh` on the board: the three `mnist_server` files (`_imem.mem`, `_dmem.mem`, `.map`), `model_int8.npz`, the two MNIST test files from `sw/mnist/data`, `riscv_loader.py` and `run_mnist_full.py`. Then `python3 run_mnist_full.py` (or `python3 run_mnist_full.py 500` for a quick check).
@@ -246,16 +311,16 @@ The demo program `led_demo.s` counts in binary on the LEDs. Hold BTN1 to see the
 
 ```
 RISCV_ML_ACC.srcs/
-  sources_1/new/    RTL: both cores, their building blocks, the ML unit and the board top
+  sources_1/new/    RTL: both cores, their building blocks, the ML unit, the matrix-vector engine and the board top
   sources_1/bd/     ps_sys, the block design with the ARM side, BRAM controllers and GPIO
   sim_1/new/        testbenches
   constrs_1/new/    pin constraints for the PYNQ-Z2
 sw/                 linker script, test environment, build scripts, demo and benchmark programs
   mnist/            quantized MNIST: training script, firmware, model header, build script, memory images,
-                    and the Python that runs on the ARM (riscv_loader.py, run_mnist_full.py)
+                    and the Python that runs on the ARM (riscv_loader.py, run_mnist.py, run_mnist_full.py)
 ```
 
-## What's next
+## Milestones
 
 - [x] Single-cycle RV32I, then RV32M
 - [x] All 48 riscv-tests passing on both cores
@@ -269,9 +334,8 @@ sw/                 linker script, test environment, build scripts, demo and ben
 - [x] MNIST on the board: the LEDs show the predicted digit for 16 test images
 - [x] Loading programs from the Zynq's ARM cores instead of rebuilding the bitstream
 - [x] The full MNIST test set on the FPGA: 96.60%, bit-exact on all 10,000 images
-- [ ] Unroll the inner loop (about 2x more, by my estimate), then several accumulators
-- [ ] Faster image transfer from the ARM (bulk copies or DMA instead of one word at a time)
-- [ ] Bigger networks: 64 or 128 hidden neurons, then a small CNN
+- [x] Unrolled inner loops: 29,776 cycles per image with `dot4.acc`
+- [x] Matrix-vector engine next to the core: 3,240 cycles per image, 41.5x over plain RV32IM
 
 ---
 
