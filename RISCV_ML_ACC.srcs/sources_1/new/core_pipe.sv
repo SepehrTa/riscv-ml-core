@@ -28,7 +28,9 @@ module core_pipe
         parameter IMEM_FILE = "test1.mem",
         parameter DMEM_FILE = "",
         parameter int IMEM_DEPTH = 1024,
-        parameter int DMEM_DEPTH = 16384
+        parameter int DMEM_DEPTH = 16384,
+        parameter bit USE_MVE = 1'b1            // ADDED: matrix-vector engine at 0x8000_1000 and up
+
     )
     (
         input  logic        clk,
@@ -369,6 +371,32 @@ module core_pipe
  
     assign io_sel_m = alu_result_m[31];        // address 0x8000_0000 and above = I/O
  
+ 
+ 
+    logic        io_int_m;
+    logic        mve_we, mve_re;
+    logic [31:0] mve_rdata;
+    assign io_int_m = (alu_result_m[17:12] == 6'd0);
+    assign mve_we   = mem_write_m & io_sel_m & ~io_int_m;              // store to the engine
+    assign mve_re   = (result_src_m == MEM_res) & io_sel_m & ~io_int_m; // load from the engine
+
+    generate
+        if (USE_MVE) begin : g_mve
+            mv_engine u_mv_engine (
+                .clk(clk), //in
+                .rst(rst), //in
+                .we(mve_we), //in
+                .re(mve_re), //in
+                .addr(alu_result_m[17:0]), //in
+                .wdata(store_data_m), //in
+                .rdata(mve_rdata) //out
+            );
+        end else begin : g_no_mve
+            assign mve_rdata = 32'b0;
+        end
+    endgenerate
+    
+    
     data_mem #(.DEPTH(DMEM_DEPTH),.INIT_FILE(DMEM_FILE) , .SYNC_READ(1)) u_data_mem(                           // CHANGED: block RAM
         .clk(clk), //in
         .en(1'b1), //in
@@ -384,7 +412,7 @@ module core_pipe
     always_ff @(posedge clk) begin             // LED register
         if (rst)
             led <= 4'b0000;
-        else if (mem_write_m & io_sel_m)
+        else if (mem_write_m & io_sel_m & io_int_m)
             led <= store_data_m[3:0];
     end
  
@@ -392,12 +420,14 @@ module core_pipe
     logic [31:0] alu_result_w, md_result_w, pc_plus4_w, mem_data_w;
     logic        io_sel_w;
     logic [31:0]  io_rdata_w;
+    logic        io_int_w;
     result_src_t result_src_w;
  
     always_ff @(posedge clk) begin
         alu_result_w <= alu_result_m;
         md_result_w  <= md_value_m;
         pc_plus4_w   <= pc_plus4_m;
+        io_int_w     <= io_int_m;
         io_sel_w     <= io_sel_m;              // CHANGED: the I/O choice moves to WB,
         io_rdata_w   <= (alu_result_m[3:2] == 2'b10) ? cycle_cnt : {28'b0, btn};   // CHANGED: 0x...8 = counter, 0x...4 = buttons                   //          where the load data now arrives
         rd_w         <= rd_m;
@@ -410,8 +440,9 @@ module core_pipe
     //=========================================================================
     // WB: write back (the result mux)
     //=========================================================================
-    assign mem_data_w = io_sel_w ? io_rdata_w  : load_data_w;   // CHANGED: was done in MEM
- 
+//    assign mem_data_w = io_sel_w ? io_rdata_w  : load_data_w;   // CHANGED: was done in MEM
+    assign mem_data_w = io_sel_w ? (io_int_w ? io_rdata_w : mve_rdata)   // CHANGED: + engine
+                                 : load_data_w;
     always_comb begin
         case (result_src_w)
             ALU_res: wb_value = alu_result_w;
@@ -421,8 +452,6 @@ module core_pipe
             default: wb_value = alu_result_w;
         endcase
     end
- 
- 
  
     assign load_use = reg_write_e && (result_src_e == MEM_res || result_src_e == MD_res) &&   // CHANGED
                       (rd_e != 0) && ((rd_e == rs1_d) || (rd_e == rs2_d));

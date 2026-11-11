@@ -55,6 +55,9 @@ def main():
     tag = "mnist_board" if board else "mnist_server" if server else "mnist"
     if unroll:
         tag += "_u4"
+    mve = "--mve" in sys.argv                            # ADDED: matrix-vector engine
+    if mve:
+        tag += "_mve"                                                                                  
 
     if not (HERE / "mnist_model.h").is_file():
         sys.exit("Missing sw/mnist/mnist_model.h. Run train_mnist.py first and commit the header.")
@@ -76,6 +79,8 @@ def main():
         flags.append("-DSERVER")
     if unroll:
         flags.append("-DUNROLL")          
+    if mve:
+        flags.append("-DMVE")       
     gcc, objcopy = PREFIX + "gcc", PREFIX + "objcopy"
     crt_obj, c_obj = BUILD / "crt0.o", BUILD / "mnist.o"
     elf = BUILD / f"{tag}.elf"

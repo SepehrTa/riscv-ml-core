@@ -49,6 +49,11 @@ volatile uint32_t mismatch_count;
 volatile uint32_t first_error;
 volatile uint32_t correct_scalar;
 volatile uint32_t correct_dot4;
+#ifdef MVE
+volatile uint32_t mve_cycles[N_TEST];       /* ADDED: matrix-vector engine, per image */
+volatile uint8_t  mve_predictions[N_TEST];
+volatile uint32_t correct_mve;
+#endif																						
 
 static inline uint32_t read_cycles(void)
 {
@@ -216,6 +221,123 @@ static void infer_dot4(const int8_t *x, int32_t logits[N_OUT])
     for (uint32_t o = 0; o < N_OUT; ++o)
         logits[o] = accelerated_dot(W2[o], hidden, N_HID, B2[o]);
 }
+#ifdef MVE
+/* ADDED: the matrix-vector engine (mv_engine.sv), memory-mapped at 0x8000_1000.
+ * It computes LANES rows of W*x at a time (32 multiply-adds per cycle); the
+ * core loads the weights once, then per image writes x, starts each layer,
+ * waits, and does the bias, requantization and ReLU itself.
+ *
+ *   0x8000_1000 registers  0x8001_0000 weights  0x8002_0000 inputs  0x8003_0000 results
+ * Weights: row r lives in bank r % LANES; group r / LANES of a layer occupies
+ * words base + g*n_words .. in every bank; bank b, word w is at (w*LANES + b)*4.
+ */
+#define MVE_LANES     8u
+#define MVE_REGS      0x00001000u
+#define MVE_WEIGHTS   0x00010000u
+#define MVE_INPUTS    0x00020000u
+#define MVE_RESULTS   0x00030000u
+#define MVE_CTRL      0x00u
+#define MVE_STATUS    0x04u
+#define MVE_WBASE     0x08u
+#define MVE_NWORDS    0x0Cu
+#define MVE_NGROUPS   0x10u
+
+#define L1_WORDS      (N_IN / 4u)                                 /* 196 */
+#define L1_GROUPS     (N_HID / MVE_LANES)                         /*   4 */
+#define L2_WORDS      (N_HID / 4u)                                /*   8 */
+#define L2_GROUPS     ((N_OUT + MVE_LANES - 1u) / MVE_LANES)      /*   2 */
+#define L2_BASE       (L1_GROUPS * L1_WORDS)                      /* 784 */
+
+_Static_assert(N_HID % MVE_LANES == 0, "layer 1 rows must fill whole groups");
+_Static_assert(L1_WORDS <= 256u, "layer 1 input must fit the input buffer");
+_Static_assert(L2_BASE + L2_GROUPS * L2_WORDS <= 1024u, "weights must fit the banks");
+_Static_assert(L2_GROUPS * MVE_LANES <= 64u, "results must fit");
+
+#ifdef __riscv
+static inline void mve_write(uint32_t off, uint32_t v)
+{
+    *(volatile uint32_t *)(uintptr_t)(0x80000000u + off) = v;
+}
+static inline uint32_t mve_read(uint32_t off)
+{
+    return *(volatile uint32_t *)(uintptr_t)(0x80000000u + off);
+}
+#else
+/* Native-host model of the engine, so the C side can be tested on a PC. */
+static uint32_t mve_w[MVE_LANES * 1024u], mve_in[256], mve_res[64], mve_reg[8];
+static void mve_write(uint32_t off, uint32_t v)
+{
+    if (off >= MVE_RESULTS) return;
+    if (off >= MVE_INPUTS)  { mve_in[(off - MVE_INPUTS) / 4u] = v; return; }
+    if (off >= MVE_WEIGHTS) { mve_w[(off - MVE_WEIGHTS) / 4u] = v; return; }
+    mve_reg[(off - MVE_REGS) / 4u] = v;
+    if (off == MVE_REGS + MVE_CTRL && (v & 1u)) {
+        uint32_t base = mve_reg[2], nw = mve_reg[3], ng = mve_reg[4];
+        for (uint32_t g = 0; g < ng; ++g)
+            for (uint32_t l = 0; l < MVE_LANES; ++l) {
+                int32_t acc = 0;
+                for (uint32_t k = 0; k < nw; ++k) {
+                    uint32_t a = mve_w[(base + g * nw + k) * MVE_LANES + l], b = mve_in[k];
+                    for (unsigned j = 0; j < 4; ++j)
+                        acc += (int8_t)(a >> (8 * j)) * (int8_t)(b >> (8 * j));
+                }
+                mve_res[g * MVE_LANES + l] = (uint32_t)acc;
+            }
+    }
+}
+static uint32_t mve_read(uint32_t off)
+{
+    if (off >= MVE_RESULTS) return mve_res[(off - MVE_RESULTS) / 4u];
+    return 0;                                   /* STATUS: never busy */
+}
+#endif
+
+/* one row of weights into its bank; row == 0 writes a row of zeros (padding) */
+static void mve_write_row(uint32_t base, uint32_t n_words, uint32_t r, const int8_t *row)
+{
+    uint32_t word0 = base + (r / MVE_LANES) * n_words;
+    for (uint32_t k = 0; k < n_words; ++k)
+        mve_write(MVE_WEIGHTS + ((word0 + k) * MVE_LANES + r % MVE_LANES) * 4u,
+                  row ? packed4(row + 4u * k) : 0u);
+}
+
+/* once at startup: W1 at word 0, W2 (padded to whole groups) right after it */
+static void mve_load_weights(void)
+{
+    for (uint32_t r = 0; r < N_HID; ++r)
+        mve_write_row(0u, L1_WORDS, r, W1[r]);
+    for (uint32_t r = 0; r < L2_GROUPS * MVE_LANES; ++r)
+        mve_write_row(L2_BASE, L2_WORDS, r, r < N_OUT ? W2[r] : 0);
+}
+
+static void mve_run(uint32_t base, uint32_t n_words, uint32_t n_groups)
+{
+    mve_write(MVE_REGS + MVE_WBASE, base);
+    mve_write(MVE_REGS + MVE_NWORDS, n_words);
+    mve_write(MVE_REGS + MVE_NGROUPS, n_groups);
+    mve_write(MVE_REGS + MVE_CTRL, 1u);
+    while (mve_read(MVE_REGS + MVE_STATUS) & 1u)
+        ;
+}
+
+static void infer_mve(const int8_t *x, int32_t logits[N_OUT])
+{
+    int8_t hidden[N_HID] __attribute__((aligned(4)));
+    for (uint32_t k = 0; k < L1_WORDS; ++k)
+        mve_write(MVE_INPUTS + 4u * k, packed4(x + 4u * k));
+    mve_run(0u, L1_WORDS, L1_GROUPS);
+    for (uint32_t h = 0; h < N_HID; ++h)
+        hidden[h] = (int8_t)requant_relu((int32_t)mve_read(MVE_RESULTS + 4u * h) + B1[h]);
+    for (uint32_t k = 0; k < L2_WORDS; ++k)
+        mve_write(MVE_INPUTS + 4u * k, packed4(hidden + 4u * k));
+    mve_run(L2_BASE, L2_WORDS, L2_GROUPS);
+    for (uint32_t o = 0; o < N_OUT; ++o)
+        logits[o] = (int32_t)mve_read(MVE_RESULTS + 4u * o) + B2[o];
+}
+#define INFER_FAST infer_mve        /* the server and the board demo use the engine */
+#else
+#define INFER_FAST infer_dot4
+#endif
 
 static uint8_t argmax(const int32_t logits[N_OUT])
 {
@@ -297,7 +419,7 @@ static void serve(void)
 			mailbox.cycles_plain = t1 - t0;
 		}
 		t0 = read_cycles();
-		infer_dot4(mailbox.image, logits);
+		INFER_FAST(mailbox.image, logits);
 		t1 = read_cycles();
 
 		for (uint32_t o = 0; o < N_OUT; ++o)
@@ -316,6 +438,10 @@ int main(void)
     first_error = 1;
     correct_scalar = 0;
     correct_dot4 = 0;
+#ifdef MVE
+    correct_mve = 0;
+    mve_load_weights();                     /* ADDED: once, before the self-check */
+#endif
     for (uint32_t t = 0; t < N_TEST; ++t) {
         int32_t baseline[N_OUT];
         int32_t accelerated[N_OUT];
@@ -335,6 +461,20 @@ int main(void)
         dot4_predictions[t] = argmax(accelerated);
         if (scalar_predictions[t] == TEST_Y[t]) ++correct_scalar;
         if (dot4_predictions[t] == TEST_Y[t]) ++correct_dot4;
+#ifdef MVE
+        {   /* ADDED: the same image on the matrix-vector engine (mode 2) */
+            int32_t engine[N_OUT];
+            t0 = read_cycles();
+            infer_mve(TEST_X[t], engine);
+            t1 = read_cycles();
+            mve_cycles[t] = t1 - t0;
+            mve_predictions[t] = argmax(engine);
+            if (mve_predictions[t] == TEST_Y[t]) ++correct_mve;
+            for (uint32_t o = 0; o < N_OUT; ++o)
+                if (engine[o] != TEST_LOGITS[t][o])
+                    record_mismatch(t, o, 2);
+        }
+#endif		   
         for (uint32_t o = 0; o < N_OUT; ++o) {
             scalar_logits[t][o] = baseline[o];
             dot4_logits[t][o] = accelerated[o];
@@ -353,7 +493,7 @@ int main(void)
 				;
 		for (uint32_t t = 0;; t = (t + 1) % N_TEST) {
 			int32_t logits[N_OUT];
-			infer_dot4(TEST_X[t], logits);
+			INFER_FAST(TEST_X[t], logits);
 			write_led(argmax(logits));
 			while (!(read_buttons() & 0x2u))    /* wait for BTN1 press   */
 				;
